@@ -1,0 +1,29 @@
+CUDA_VISIBLE_DEVICES=0 python rl_train_ARC.py \
+  --epochs 100 \
+  --depth 10 \
+  --batch-size 4 \
+  --image-size 64 \
+  --patch-size 2 \
+  --learning-rate 1e-5 \
+  --weight-decay 0 \
+  --embed-dim 512 \
+  --num-heads 8 \
+  --num-colors 12 \
+  --resume-checkpoint "saves/offline_train_ViT/checkpoint_best.pt" \
+  --lr-scheduler "none" \
+  --train-split "eval_color_permute_ttt_9/af24b4cc" \
+  --eval-split "eval_color_permute_ttt_9/af24b4cc" \
+  --data-root "raw_data/ARC-AGI" \
+  --resume-skip-task-token \
+  --architecture "vit" \
+  --reward-model-id "Qwen/Qwen3-VL-2B-Instruct" \
+  --reward-dtype "bfloat16" \
+  --reward-use-image \
+  --rl-group-size 4 \
+  --rl-update-epochs 2 \
+  --rl-beta 0.01 \
+  --rl-clip-eps 0.2 \
+  --rl-entropy-coef 0.001 \
+  --rl-max-steps 200 \
+  --rl-save-path "saves/rl_stage/af24b4cc_rl.pt" \
+  --rl-disable-aug
