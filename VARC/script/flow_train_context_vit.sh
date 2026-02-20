@@ -10,6 +10,8 @@ python flow_train_ARC.py \
   --num-heads 8 \
   --mlp-ratio 4.0 \
   --dropout 0.1 \
+  --no-framewise-causal-attention \
+  --attention-backend "auto" \
   --batch-size 16 \
   --eval-batch-size 8 \
   --log-every-steps 25 \

@@ -41,6 +41,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--mlp-ratio", type=float, default=4.0)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--framewise-causal-attention",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable framewise causal attention (frame f attends only to frames <= f).",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        default="auto",
+        choices=("auto", "flex", "sdpa"),
+        help="Attention backend for framewise-causal mode.",
+    )
 
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=8)
@@ -505,6 +518,8 @@ def train(args: argparse.Namespace) -> None:
         num_heads=args.num_heads,
         mlp_ratio=args.mlp_ratio,
         dropout=args.dropout,
+        framewise_causal_attention=args.framewise_causal_attention,
+        attention_backend=args.attention_backend,
     ).to(device)
 
     optimizer = torch.optim.AdamW(

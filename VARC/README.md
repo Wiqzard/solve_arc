@@ -207,6 +207,9 @@ Evaluation:
 - Initialize only the last solution frame from noise
 - Denoise only that last frame via Euler integration
 - Report exact-match sample/task accuracy
+- Optional attention mode:
+  - `--framewise-causal-attention` restricts attention so frame `f` only sees frames `<= f`
+  - `--attention-backend flex|sdpa|auto` picks backend (`auto` uses flex on CUDA when available)
 
 Run:
 ```
@@ -225,6 +228,8 @@ python flow_train_ARC.py \
   --epochs 20 \
   --learning-rate 2e-4 \
   --loss-on-target-only \
+  --framewise-causal-attention \
+  --attention-backend flex \
   --sample-steps 40 \
   --save-path saves/flow_context_vit/checkpoint_last.pt \
   --best-save-path saves/flow_context_vit/checkpoint_best.pt
@@ -249,6 +254,9 @@ Evaluation:
 - Keep demos + query input clean.
 - Initialize only the last solution frame as random tokens.
 - Run discrete Euler updates for that frame only, measure exact-match sample/task accuracy.
+- Optional attention mode:
+  - `--framewise-causal-attention` restricts attention so frame `f` only sees frames `<= f`
+  - `--attention-backend flex|sdpa|auto` picks backend (`auto` uses flex on CUDA when available)
 
 Run:
 ```
@@ -268,6 +276,8 @@ python flow_train_discrete_ARC.py \
   --learning-rate 2e-4 \
   --loss-on-target-only \
   --discrete-rate 5.0 \
+  --framewise-causal-attention \
+  --attention-backend flex \
   --reverse-sampler sample \
   --sample-steps 40 \
   --wandb-num-vis-samples 8 \
