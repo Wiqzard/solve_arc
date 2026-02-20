@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import os
 import random
 import time
@@ -69,6 +70,12 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
+def autocast_context(device: torch.device, enabled: bool):
+    if enabled and device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ARC frame-context ViT from scratch with flow matching.")
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
@@ -110,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")
+    parser.add_argument("--bf16-autocast", action="store_true", help="Enable bfloat16 autocast on CUDA.")
 
     parser.add_argument(
         "--loss-on-target-only",
@@ -196,6 +204,7 @@ def denoise_last_solution_frame(
     target_frame_index: torch.Tensor,
     num_colors: int,
     steps: int,
+    autocast_enabled: bool = False,
 ) -> torch.Tensor:
     model.eval()
     x0 = one_hot_frames(frames, num_colors=num_colors)
@@ -212,7 +221,8 @@ def denoise_last_solution_frame(
         frame_times = torch.zeros((batch_size, frame_count), dtype=torch.float32, device=device)
         frame_times[batch_idx, target_frame_index] = t
 
-        pred_velocity = model(state, frame_times, frame_valid_mask=frame_valid_mask)
+        with autocast_context(device, autocast_enabled):
+            pred_velocity = model(state, frame_times, frame_valid_mask=frame_valid_mask)
         state[batch_idx, target_frame_index] = state[batch_idx, target_frame_index] - pred_velocity[batch_idx, target_frame_index] * dt
 
         for b in range(batch_size):
@@ -235,6 +245,7 @@ def evaluate_last_frame_accuracy(
     num_colors: int,
     sample_steps: int,
     show_progress: bool = True,
+    autocast_enabled: bool = False,
 ) -> Dict[str, float]:
     if loader is None:
         return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}
@@ -258,6 +269,7 @@ def evaluate_last_frame_accuracy(
             target_frame_index=target_frame_index,
             num_colors=num_colors,
             steps=sample_steps,
+            autocast_enabled=autocast_enabled,
         )
 
         valid = target_valid_mask.bool()
@@ -319,6 +331,9 @@ def train(args: argparse.Namespace) -> None:
     distributed, rank, local_rank, world_size, device = setup_distributed(args)
     is_main = rank == 0
     set_seed(args.seed + rank)
+    bf16_autocast = bool(args.bf16_autocast and device.type == "cuda" and torch.cuda.is_bf16_supported())
+    if args.bf16_autocast and is_main and not bf16_autocast:
+        print("Warning: BF16 autocast requested but unavailable on this device. Falling back to fp32.")
 
     train_dataset, train_loader, eval_dataset, eval_loader, train_sampler, eval_sampler = build_flow_context_dataloaders(
         args,
@@ -401,9 +416,10 @@ def train(args: argparse.Namespace) -> None:
             )
 
             x_t, target_velocity = build_noisy_state(x0, frame_times)
-            pred_velocity = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+            with autocast_context(device, bf16_autocast):
+                pred_velocity = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
             loss = flow_matching_loss(
-                pred_velocity,
+                pred_velocity.float(),
                 target_velocity,
                 frame_valid_mask=frame_valid_mask,
                 target_frame_index=target_frame_index,
@@ -478,6 +494,7 @@ def train(args: argparse.Namespace) -> None:
                 num_colors=args.num_colors,
                 sample_steps=args.sample_steps,
                 show_progress=is_main,
+                autocast_enabled=bf16_autocast,
             )
             if is_main:
                 log_data.update(

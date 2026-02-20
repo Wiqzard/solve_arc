@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import os
 import random
 import time
@@ -69,6 +70,12 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
+def autocast_context(device: torch.device, enabled: bool):
+    if enabled and device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ARC frame-context ViT with discrete flow matching.")
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
@@ -110,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")
+    parser.add_argument("--bf16-autocast", action="store_true", help="Enable bfloat16 autocast on CUDA.")
 
     parser.add_argument(
         "--loss-on-target-only",
@@ -402,6 +410,7 @@ def denoise_last_solution_frame_discrete(
     steps: int,
     beta: float,
     reverse_sampler: str,
+    autocast_enabled: bool = False,
 ) -> torch.Tensor:
     model.eval()
     state = frames.clone()
@@ -428,8 +437,9 @@ def denoise_last_solution_frame_discrete(
         frame_times[batch_idx, target_frame_index] = t
 
         state_onehot = one_hot_frames(state, num_colors=num_colors)
-        logits = model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask)
-        target_logits = logits[batch_idx, target_frame_index]
+        with autocast_context(device, autocast_enabled):
+            logits = model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask)
+        target_logits = logits[batch_idx, target_frame_index].float()
         pred_x1_probs = torch.softmax(target_logits, dim=-1).reshape(-1, num_colors)
         if reverse_sampler == "argmax":
             proposed_flat = torch.argmax(pred_x1_probs, dim=-1)
@@ -462,6 +472,7 @@ def evaluate_last_frame_accuracy(
     reverse_sampler: str,
     collect_examples: int = 0,
     show_progress: bool = True,
+    autocast_enabled: bool = False,
 ) -> tuple[Dict[str, float], List[Dict[str, Any]]]:
     if loader is None:
         return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}, []
@@ -488,6 +499,7 @@ def evaluate_last_frame_accuracy(
             steps=sample_steps,
             beta=beta,
             reverse_sampler=reverse_sampler,
+            autocast_enabled=autocast_enabled,
         )
 
         valid = target_valid_mask.bool()
@@ -562,6 +574,9 @@ def train(args: argparse.Namespace) -> None:
     distributed, rank, local_rank, world_size, device = setup_distributed(args)
     is_main = rank == 0
     set_seed(args.seed + rank)
+    bf16_autocast = bool(args.bf16_autocast and device.type == "cuda" and torch.cuda.is_bf16_supported())
+    if args.bf16_autocast and is_main and not bf16_autocast:
+        print("Warning: BF16 autocast requested but unavailable on this device. Falling back to fp32.")
 
     train_dataset, train_loader, eval_dataset, eval_loader, train_sampler, eval_sampler = build_flow_context_dataloaders(
         args,
@@ -650,9 +665,10 @@ def train(args: argparse.Namespace) -> None:
                 beta=args.discrete_rate,
             )
             x_t = one_hot_frames(x_t_tokens, num_colors=args.num_colors)
-            logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+            with autocast_context(device, bf16_autocast):
+                logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
             loss = discrete_flow_matching_loss(
-                logits,
+                logits.float(),
                 frames,
                 x_t_tokens,
                 frame_valid_mask=frame_valid_mask,
@@ -731,6 +747,7 @@ def train(args: argparse.Namespace) -> None:
                 reverse_sampler=args.reverse_sampler,
                 collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
                 show_progress=is_main,
+                autocast_enabled=bf16_autocast,
             )
             if is_main:
                 log_data.update(

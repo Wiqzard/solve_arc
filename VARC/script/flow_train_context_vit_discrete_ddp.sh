@@ -24,6 +24,7 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_A
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
+  --bf16-autocast \
   --discrete-rate 5.0 \
   --reverse-sampler "sample" \
   --sample-steps 40 \

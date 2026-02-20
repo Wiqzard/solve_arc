@@ -231,7 +231,8 @@ torchrun --nproc_per_node=4 flow_train_ARC.py \
   --image-size 30 \
   --num-colors 12 \
   --epochs 20 \
-  --learning-rate 2e-4
+  --learning-rate 2e-4 \
+  --bf16-autocast
 ```
 In DDP mode, evaluation is sharded across GPUs and metrics are aggregated globally; only rank 0 logs/checkpoints.
 
@@ -246,6 +247,7 @@ python flow_train_ARC.py \
   --num-colors 12 \
   --epochs 20 \
   --learning-rate 2e-4 \
+  --bf16-autocast \
   --framewise-causal-attention \
   --attention-backend flex \
   --sample-steps 40 \
@@ -298,6 +300,7 @@ torchrun --nproc_per_node=4 flow_train_discrete_ARC.py \
   --num-colors 12 \
   --epochs 20 \
   --learning-rate 2e-4 \
+  --bf16-autocast \
   --discrete-rate 5.0
 ```
 In DDP mode, evaluation is sharded across GPUs and metrics are aggregated globally; only rank 0 logs/checkpoints.
@@ -313,6 +316,7 @@ python flow_train_discrete_ARC.py \
   --num-colors 12 \
   --epochs 20 \
   --learning-rate 2e-4 \
+  --bf16-autocast \
   --discrete-rate 5.0 \
   --framewise-causal-attention \
   --attention-backend flex \
