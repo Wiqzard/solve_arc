@@ -4,7 +4,7 @@ import argparse
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -64,24 +64,18 @@ def parse_args() -> argparse.Namespace:
         "--discrete-rate",
         type=float,
         default=5.0,
-        help="CTMC replacement rate beta for q_t = exp(t*R).",
-    )
-    parser.add_argument(
-        "--weight-by-inverse-noise",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Weight CE by 1/(1-sigma_t) to emphasize low-noise denoising consistency.",
+        help="CTMC jump rate beta for kappa_t = 1-exp(-beta*t).",
     )
     parser.add_argument(
         "--reverse-sampler",
         type=str,
         default="sample",
         choices=("sample", "argmax"),
-        help="How to draw x_s from model reverse kernel during evaluation.",
+        help="How to choose x_1 from p_theta(x_1|x_t,t) in Euler sampling.",
     )
 
     parser.add_argument("--eval-every", type=int, default=1)
-    parser.add_argument("--sample-steps", type=int, default=40, help="Discrete reverse steps for last-frame denoising.")
+    parser.add_argument("--sample-steps", type=int, default=40, help="Discrete Euler steps for last-frame generation.")
 
     parser.add_argument("--save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_last.pt")
     parser.add_argument("--best-save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_best.pt")
@@ -112,22 +106,6 @@ def sigma_from_time(t: torch.Tensor, beta: float) -> torch.Tensor:
     return torch.exp(-beta * t)
 
 
-def transition_matrix_uniform(
-    *,
-    t: float | torch.Tensor,
-    num_colors: int,
-    beta: float,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Q_t where Q_t[i,j] = p(x_t=j | x_0=i)."""
-    t_tensor = torch.tensor(float(t), device=device, dtype=dtype) if not torch.is_tensor(t) else t.to(device=device, dtype=dtype)
-    sigma = sigma_from_time(t_tensor, beta=beta)
-    eye = torch.eye(num_colors, device=device, dtype=dtype)
-    ones = torch.ones((num_colors, num_colors), device=device, dtype=dtype) / float(num_colors)
-    return sigma * eye + (1.0 - sigma) * ones
-
-
 def sample_xt_from_qt(
     clean_tokens: torch.Tensor,
     frame_valid_mask: torch.Tensor,
@@ -135,70 +113,71 @@ def sample_xt_from_qt(
     *,
     num_colors: int,
     beta: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Sample x_t from exact CTMC marginal q_t(x_t|x_0)."""
-    x0_onehot = one_hot_frames(clean_tokens, num_colors=num_colors)
-    sigma = sigma_from_time(frame_times, beta=beta)[:, :, None, None, None]
-    q_t_probs = sigma * x0_onehot + (1.0 - sigma) / float(num_colors)
-    flat_probs = q_t_probs.reshape(-1, num_colors)
-    sampled = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
-    x_t = sampled.reshape_as(clean_tokens)
+) -> torch.Tensor:
+    """
+    Sample x_t from a mixture discrete path:
+    x_t = x_0 (uniform source) with prob sigma_t, else x_1 (clean target).
+    """
+    source_tokens = torch.randint(
+        low=0,
+        high=num_colors,
+        size=clean_tokens.shape,
+        device=clean_tokens.device,
+        dtype=clean_tokens.dtype,
+    )
+    sigma = sigma_from_time(frame_times, beta=beta)[:, :, None, None]
+    source_mask = torch.rand(clean_tokens.shape, device=clean_tokens.device) < sigma
+    x_t = torch.where(source_mask, source_tokens, clean_tokens)
 
-    changed = (x_t != clean_tokens) & frame_valid_mask.bool()
-    return x_t, changed, q_t_probs
+    # Keep padding area unchanged; those positions are always masked out of the loss.
+    valid = frame_valid_mask.bool()
+    return torch.where(valid, x_t, clean_tokens)
 
 
 def discrete_flow_matching_loss(
     logits: torch.Tensor,
     clean_tokens: torch.Tensor,
+    x_t_tokens: torch.Tensor,
     *,
     frame_valid_mask: torch.Tensor,
-    changed_mask: torch.Tensor,
     target_frame_index: torch.Tensor,
     target_valid_mask: torch.Tensor,
-    frame_times: torch.Tensor,
     beta: float,
     target_only: bool,
-    weight_by_inverse_noise: bool,
 ) -> torch.Tensor:
-    # logits: (B, F, H, W, C)
+    # logits: (B, F, H, W, C), predicts p_theta(x_1 | x_t, t)
+    def generalized_kl_per_token(
+        *,
+        log_probs: torch.Tensor,
+        probs: torch.Tensor,
+        x1_tokens: torch.Tensor,
+        xt_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        p1_xt = probs.gather(dim=-1, index=xt_tokens.unsqueeze(-1)).squeeze(-1)
+        log_p1_x1 = log_probs.gather(dim=-1, index=x1_tokens.unsqueeze(-1)).squeeze(-1)
+        delta = (xt_tokens == x1_tokens).float()
+        return -beta * (p1_xt - delta + (1.0 - delta) * log_p1_x1)
+
     if target_only:
         batch = logits.size(0)
         batch_idx = torch.arange(batch, device=logits.device)
-        pred = logits[batch_idx, target_frame_index]  # (B, H, W, C)
-        target = clean_tokens[batch_idx, target_frame_index]  # (B, H, W)
+        pred = logits[batch_idx, target_frame_index]
+        target = clean_tokens[batch_idx, target_frame_index]
+        xt = x_t_tokens[batch_idx, target_frame_index]
         valid = target_valid_mask.bool()
-        changed = changed_mask[batch_idx, target_frame_index]
-
-        used = valid & changed
-        if not used.any():
-            used = valid
-        ce = F.cross_entropy(pred.permute(0, 3, 1, 2), target, reduction="none")
-        if weight_by_inverse_noise:
-            sigma = sigma_from_time(frame_times[batch_idx, target_frame_index], beta=beta).clamp(max=1 - 1e-4)
-            weight = (1.0 / (1.0 - sigma))[:, None, None]
-        else:
-            weight = torch.ones((batch, 1, 1), device=logits.device)
-        masked = ce * used.float() * weight
-        denom = (used.float() * weight).sum().clamp_min(1.0)
+        log_probs = F.log_softmax(pred, dim=-1)
+        probs = torch.exp(log_probs)
+        loss_map = generalized_kl_per_token(log_probs=log_probs, probs=probs, x1_tokens=target, xt_tokens=xt)
+        masked = loss_map * valid.float()
+        denom = valid.float().sum().clamp_min(1.0)
         return masked.sum() / denom
 
-    ce = F.cross_entropy(
-        logits.permute(0, 1, 4, 2, 3).reshape(-1, logits.size(-1), logits.size(2), logits.size(3)),
-        clean_tokens.reshape(-1, clean_tokens.size(2), clean_tokens.size(3)),
-        reduction="none",
-    ).reshape_as(clean_tokens).float()
-    used = frame_valid_mask.bool() & changed_mask.bool()
-    if not used.any():
-        used = frame_valid_mask.bool()
-
-    if weight_by_inverse_noise:
-        sigma = sigma_from_time(frame_times, beta=beta).clamp(max=1 - 1e-4)
-        weight = (1.0 / (1.0 - sigma))[:, :, None, None]
-    else:
-        weight = torch.ones_like(frame_times)[:, :, None, None]
-    masked = ce * used.float() * weight
-    denom = (used.float() * weight).sum().clamp_min(1.0)
+    log_probs = F.log_softmax(logits, dim=-1)
+    probs = torch.exp(log_probs)
+    loss_map = generalized_kl_per_token(log_probs=log_probs, probs=probs, x1_tokens=clean_tokens, xt_tokens=x_t_tokens)
+    valid = frame_valid_mask.bool()
+    masked = loss_map * valid.float()
+    denom = valid.float().sum().clamp_min(1.0)
     return masked.sum() / denom
 
 
@@ -220,7 +199,7 @@ def denoise_last_solution_frame_discrete(
     device = state.device
     batch_idx = torch.arange(batch_size, device=device)
 
-    # Start from q_{t=1} on target frame; keep all other frames clean context.
+    # Start from source distribution (uniform random tokens) on the target frame.
     random_target = torch.randint(
         low=0,
         high=num_colors,
@@ -230,68 +209,33 @@ def denoise_last_solution_frame_discrete(
     )
     state[batch_idx, target_frame_index] = random_target
 
-    clean_context = frames.clone()
     target_valid_mask = frame_valid_mask[batch_idx, target_frame_index].bool()
-    for step in range(steps, 0, -1):
+    dt = 1.0 / float(max(steps, 1))
+    jump_prob = 1.0 - np.exp(-beta * dt)
+    for step in range(steps):
         t = float(step) / float(steps)
-        t_next = float(step - 1) / float(steps)
         frame_times = torch.zeros((batch_size, frame_count), dtype=torch.float32, device=device)
         frame_times[batch_idx, target_frame_index] = t
 
         state_onehot = one_hot_frames(state, num_colors=num_colors)
         logits = model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask)
-        target_logits = logits[batch_idx, target_frame_index]  # (B, H, W, C)
-        pred_x0 = torch.softmax(target_logits, dim=-1).reshape(-1, num_colors)  # p_theta(x0 | x_t, t)
-        xt_token = state[batch_idx, target_frame_index].reshape(-1)
-
-        # Exact reverse kernel p_theta(x_s | x_t) = sum_{x0} q_{s|t}(x_s|x_t,x0) p_theta(x0|x_t)
-        q_s = transition_matrix_uniform(
-            t=t_next,
-            num_colors=num_colors,
-            beta=beta,
-            device=device,
-            dtype=pred_x0.dtype,
-        )
-        q_t = transition_matrix_uniform(
-            t=t,
-            num_colors=num_colors,
-            beta=beta,
-            device=device,
-            dtype=pred_x0.dtype,
-        )
-        q_delta = transition_matrix_uniform(
-            t=max(t - t_next, 0.0),
-            num_colors=num_colors,
-            beta=beta,
-            device=device,
-            dtype=pred_x0.dtype,
-        )
-
-        # denominator per candidate clean state i: q_t(k|i)
-        denom = q_t[:, xt_token].T.clamp_min(1e-8)  # (N, K)
-        weighted = pred_x0 / denom  # (N, K)
-        mix = weighted @ q_s  # (N, K) over x_s=j
-        q_delta_col = q_delta[:, xt_token].T  # (N, K), q_delta(j->k)
-        reverse_probs = mix * q_delta_col
-        reverse_probs = reverse_probs / reverse_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-
+        target_logits = logits[batch_idx, target_frame_index]
+        pred_x1_probs = torch.softmax(target_logits, dim=-1).reshape(-1, num_colors)
         if reverse_sampler == "argmax":
-            next_token_flat = torch.argmax(reverse_probs, dim=-1)
+            proposed_flat = torch.argmax(pred_x1_probs, dim=-1)
         else:
-            next_token_flat = torch.multinomial(reverse_probs, num_samples=1).squeeze(-1)
-        next_token = next_token_flat.reshape(batch_size, state.size(2), state.size(3))
+            proposed_flat = torch.multinomial(pred_x1_probs, num_samples=1).squeeze(-1)
+        proposed = proposed_flat.reshape(batch_size, state.size(2), state.size(3))
 
         current = state[batch_idx, target_frame_index]
-        current[target_valid_mask] = next_token[target_valid_mask]
+        if step == steps - 1:
+            current[target_valid_mask] = proposed[target_valid_mask]
+        else:
+            jump_mask = (
+                torch.rand(current.shape, device=device) < jump_prob
+            ) & target_valid_mask & (proposed != current)
+            current[jump_mask] = proposed[jump_mask]
         state[batch_idx, target_frame_index] = current
-
-        # Always keep context frames clean.
-        for b in range(batch_size):
-            ti = int(target_frame_index[b].item())
-            if ti > 0:
-                state[b, :ti] = clean_context[b, :ti]
-            if ti + 1 < frame_count:
-                state[b, ti + 1 :] = clean_context[b, ti + 1 :]
 
     return state[batch_idx, target_frame_index]
 
@@ -438,7 +382,7 @@ def train(args: argparse.Namespace) -> None:
                 max_t=args.max_noise_level,
             )
 
-            x_t_tokens, changed_mask, _ = sample_xt_from_qt(
+            x_t_tokens = sample_xt_from_qt(
                 frames,
                 frame_valid_mask,
                 frame_times,
@@ -450,14 +394,12 @@ def train(args: argparse.Namespace) -> None:
             loss = discrete_flow_matching_loss(
                 logits,
                 frames,
+                x_t_tokens,
                 frame_valid_mask=frame_valid_mask,
-                changed_mask=changed_mask,
                 target_frame_index=target_frame_index,
                 target_valid_mask=target_valid_mask,
-                frame_times=frame_times,
                 beta=args.discrete_rate,
                 target_only=args.loss_on_target_only,
-                weight_by_inverse_noise=args.weight_by_inverse_noise,
             )
 
             optimizer.zero_grad(set_to_none=True)

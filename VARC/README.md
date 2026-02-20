@@ -231,24 +231,24 @@ python flow_train_ARC.py \
 ```
 
 ### 7. Discrete flow matching from scratch (logit-based)
-This repo also includes `flow_train_discrete_ARC.py`, which keeps the same context construction but uses a discrete corruption path and token-logit training objective.
+This repo also includes `flow_train_discrete_ARC.py`, which keeps the same context construction but uses a strict discrete flow-matching setup aligned with [facebookresearch/flow_matching](https://github.com/facebookresearch/flow_matching/tree/main).
 
 Discrete training path:
 - Sample per-frame noise levels `t_f` independently.
-- Use an exact CTMC forward kernel to uniform:
-  - `q_t(x_t | x_0) = exp(t R)` with rate `beta` (`--discrete-rate`)
-  - closed form in code: `sigma_t = exp(-beta * t)`, then
-    `q_t = sigma_t * onehot(x_0) + (1-sigma_t)/K`
-- Model predicts logits over colors for every token.
-- Loss is cross-entropy to clean tokens on corrupted positions (default: only final solution frame), with optional `1/(1-sigma_t)` weighting.
-- Reverse sampling uses the exact marginalized reverse kernel:
-  - `p_theta(x_s | x_t) = sum_{x_0} q_{s|t}(x_s | x_t, x_0) p_theta(x_0 | x_t, t)`
-  - selectable sampler: `--reverse-sampler sample|argmax`
+- Build a mixture discrete path with a uniform source token and clean ARC token target:
+  - `sigma_t = exp(-beta * t)` (`--discrete-rate = beta`)
+  - sample `x_t = x_0` with probability `sigma_t`, else `x_t = x_1`
+- Model predicts logits for `p_theta(x_1 | x_t, t)` over colors.
+- Loss uses the generalized KL form from `flow_matching` (`MixturePathGeneralizedKL`) on valid pixels:
+  - `-beta * [ p_theta(x_t|x_t,t) - delta_{x_t,x_1} + (1-delta_{x_t,x_1}) log p_theta(x_1|x_t,t) ]`
+- Sampling uses a discrete Euler update equivalent to `MixtureDiscreteEulerSolver`:
+  - choose proposal `x_1` from logits (`--reverse-sampler sample|argmax`)
+  - apply jump probability `1 - exp(-beta * dt)` per step on the target frame
 
 Evaluation:
 - Keep demos + query input clean.
 - Initialize only the last solution frame as random tokens.
-- Run discrete reverse updates for that frame only, measure exact-match sample/task accuracy.
+- Run discrete Euler updates for that frame only, measure exact-match sample/task accuracy.
 
 Run:
 ```
@@ -268,7 +268,6 @@ python flow_train_discrete_ARC.py \
   --learning-rate 2e-4 \
   --loss-on-target-only \
   --discrete-rate 5.0 \
-  --weight-by-inverse-noise \
   --reverse-sampler sample \
   --sample-steps 40 \
   --save-path saves/flow_context_vit_discrete/checkpoint_last.pt \

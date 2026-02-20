@@ -18,7 +18,6 @@ python flow_train_discrete_ARC.py \
   --weight-decay 0 \
   --loss-on-target-only \
   --discrete-rate 5.0 \
-  --weight-by-inverse-noise \
   --reverse-sampler "sample" \
   --sample-steps 40 \
   --save-path "saves/flow_context_vit_discrete/checkpoint_last.pt" \
