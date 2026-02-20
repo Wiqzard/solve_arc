@@ -25,5 +25,11 @@ CUDA_VISIBLE_DEVICES=0 python rl_train_ARC.py \
   --rl-clip-eps 0.2 \
   --rl-entropy-coef 0.001 \
   --rl-max-steps 200 \
+  --rl-vis-every 10 \
+  --rl-vis-samples 4 \
+  --rl-vis-dir "outputs/rl_vis/af24b4cc" \
+  --use-wandb \
+  --wandb-project "VisionARC" \
+  --wandb-run-name "varc-rl-af24b4cc" \
   --rl-save-path "saves/rl_stage/af24b4cc_rl.pt" \
   --rl-disable-aug

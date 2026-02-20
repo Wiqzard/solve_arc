@@ -2,20 +2,26 @@ import argparse
 import copy
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image, ImageDraw
 from torch.distributions import Categorical
 
 from src.ARC_loader import IGNORE_INDEX, PAD_INDEX, build_dataloaders
 from utils.args import build_parser
 from utils.distribution import init_distributed_mode
 from utils.load_model import load_model_only
-from utils.vlm_reward import QwenYesNoRewardModel, TaskContextCache
+from utils.vlm_reward import QwenYesNoRewardModel, TaskContextCache, compose_task_image, render_arc_grid
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 def set_seed(seed: int) -> None:
@@ -44,6 +50,10 @@ def add_rl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rl-log-every", type=int, default=1)
     parser.add_argument("--rl-save-every", type=int, default=50)
     parser.add_argument("--rl-save-path", type=str, default="saves/rl_stage/checkpoint_final.pt")
+    parser.add_argument("--rl-vis-every", type=int, default=25, help="Log sample visualizations every N RL steps.")
+    parser.add_argument("--rl-vis-samples", type=int, default=4, help="Number of sampled rollouts to visualize per logging step.")
+    parser.add_argument("--rl-vis-max-context", type=int, default=3, help="Number of demo pairs to include in each visualization.")
+    parser.add_argument("--rl-vis-dir", type=str, default="outputs/rl_vis", help="Optional directory for saving rollout visualizations.")
     parser.add_argument(
         "--rl-disable-aug",
         action=argparse.BooleanOptionalAction,
@@ -119,6 +129,46 @@ def decode_prediction_grid(
     return downsample_by_majority(prediction, max(1, int(scale_factor)))
 
 
+@dataclass
+class RolloutVisualization:
+    image: Image.Image
+    task_name: str
+    reward: float
+    yes_logit: float
+    no_logit: float
+    example_index: int
+
+
+def build_rollout_visualization(
+    *,
+    train_examples: Sequence[Dict[str, Any]],
+    query_input: Sequence[Sequence[int]],
+    candidate_output: Sequence[Sequence[int]],
+    ground_truth: Optional[Sequence[Sequence[int]]],
+    max_context: int,
+) -> Image.Image:
+    base_image = compose_task_image(
+        train_examples=train_examples,
+        query_input=query_input,
+        candidate_output=candidate_output,
+        max_context=max_context,
+    )
+    if ground_truth is None:
+        return base_image
+
+    gt_image = render_arc_grid(ground_truth)
+    panel_height = gt_image.height + 2 * 14
+    panel = Image.new("RGB", (base_image.width, panel_height), color=(255, 255, 255))
+    panel_draw = ImageDraw.Draw(panel)
+    panel_draw.text((12, 8), "ground truth output", fill=(0, 0, 0))
+    panel.paste(gt_image, (12, 24))
+
+    merged = Image.new("RGB", (base_image.width, base_image.height + panel.height + 8), color=(255, 255, 255))
+    merged.paste(base_image, (0, 0))
+    merged.paste(panel, (0, base_image.height + 8))
+    return merged
+
+
 def build_action_mask(
     *,
     targets: torch.Tensor,
@@ -183,8 +233,10 @@ class RolloutBatch:
     advantages: torch.Tensor
     rewards: torch.Tensor
     mean_reward: float
+    std_reward: float
     mean_yes_logit: float
     mean_no_logit: float
+    visualizations: List[RolloutVisualization] = field(default_factory=list)
 
 
 def collect_rollout(
@@ -198,6 +250,9 @@ def collect_rollout(
     action_mask_mode: str,
     temperature: float,
     device: torch.device,
+    collect_visualizations: bool = False,
+    max_visualizations: int = 0,
+    visualization_context: int = 3,
 ) -> RolloutBatch:
     inputs = batch["inputs"].to(device)
     attention_mask = batch["attention_mask"].to(device)
@@ -207,6 +262,7 @@ def collect_rollout(
     scale_factors = batch["scale_factors"].to(device)
     task_names = batch["task_names"]
     raw_inputs = batch["raw_inputs"]
+    raw_outputs = batch["raw_outputs"]
 
     repeated_inputs = _repeat_tensor(inputs, group_size)
     repeated_mask = _repeat_tensor(attention_mask, group_size)
@@ -216,6 +272,7 @@ def collect_rollout(
     repeated_scales = _repeat_tensor(scale_factors, group_size)
     repeated_task_names = _repeat_list(task_names, group_size)
     repeated_raw_inputs = _repeat_list(raw_inputs, group_size)
+    repeated_raw_outputs = _repeat_list(raw_outputs, group_size)
 
     action_mask = build_action_mask(
         targets=repeated_targets,
@@ -233,6 +290,7 @@ def collect_rollout(
     rewards: List[float] = []
     yes_logits: List[float] = []
     no_logits: List[float] = []
+    visualizations: List[RolloutVisualization] = []
 
     actions_np = actions.detach().cpu().numpy()
     repeated_offsets_cpu = repeated_offsets.detach().cpu().tolist()
@@ -254,6 +312,24 @@ def collect_rollout(
         rewards.append(reward.reward)
         yes_logits.append(reward.yes_logit)
         no_logits.append(reward.no_logit)
+        if collect_visualizations and len(visualizations) < max_visualizations:
+            viz_image = build_rollout_visualization(
+                train_examples=train_examples,
+                query_input=query_input,
+                candidate_output=candidate_output,
+                ground_truth=repeated_raw_outputs[i],
+                max_context=visualization_context,
+            )
+            visualizations.append(
+                RolloutVisualization(
+                    image=viz_image,
+                    task_name=str(task_name),
+                    reward=float(reward.reward),
+                    yes_logit=float(reward.yes_logit),
+                    no_logit=float(reward.no_logit),
+                    example_index=i,
+                )
+            )
 
     reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
     grouped = reward_tensor.view(inputs.shape[0], group_size)
@@ -272,8 +348,10 @@ def collect_rollout(
         advantages=advantages,
         rewards=reward_tensor,
         mean_reward=float(np.mean(rewards)),
+        std_reward=float(np.std(rewards)),
         mean_yes_logit=float(np.mean(yes_logits)),
         mean_no_logit=float(np.mean(no_logits)),
+        visualizations=visualizations,
     )
 
 
@@ -351,6 +429,52 @@ def save_checkpoint(
     torch.save(payload, save_path)
 
 
+def save_visualizations_locally(
+    *,
+    visualizations: Sequence[RolloutVisualization],
+    output_dir: Path,
+    step: int,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for idx, item in enumerate(visualizations):
+        safe_task_name = item.task_name.replace("/", "_")
+        file_name = f"step_{step:06d}_{idx:02d}_{safe_task_name}.png"
+        item.image.save(output_dir / file_name)
+
+
+def log_to_wandb(
+    *,
+    wandb_run: Any,
+    step: int,
+    epoch: int,
+    elapsed: float,
+    rollout: RolloutBatch,
+    stats: Dict[str, float],
+) -> None:
+    metrics: Dict[str, Any] = {
+        "rl/epoch": epoch,
+        "rl/step": step,
+        "rl/reward_mean": rollout.mean_reward,
+        "rl/reward_std": rollout.std_reward,
+        "rl/yes_logit_mean": rollout.mean_yes_logit,
+        "rl/no_logit_mean": rollout.mean_no_logit,
+        "rl/policy_loss": stats["policy_loss"],
+        "rl/kl": stats["kl"],
+        "rl/entropy": stats["entropy"],
+        "rl/elapsed_sec": elapsed,
+    }
+    if rollout.visualizations:
+        wandb_images = []
+        for item in rollout.visualizations:
+            caption = (
+                f"task={item.task_name} idx={item.example_index} "
+                f"reward={item.reward:.3f} yes={item.yes_logit:.3f} no={item.no_logit:.3f}"
+            )
+            wandb_images.append(wandb.Image(item.image, caption=caption))
+        metrics["rl/samples"] = wandb_images
+    wandb_run.log(metrics, step=step)
+
+
 def train(args: argparse.Namespace) -> None:
     distributed, rank, world_size, local_rank, device = init_distributed_mode(args)
     if distributed:
@@ -409,6 +533,17 @@ def train(args: argparse.Namespace) -> None:
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    wandb_run = None
+    if args.use_wandb:
+        if wandb is None:
+            raise RuntimeError("Weights & Biases is not installed. Install wandb or disable --use-wandb.")
+        wandb_kwargs: Dict[str, Any] = {
+            "project": args.wandb_project,
+            "config": dict(vars(args)),
+        }
+        if args.wandb_run_name:
+            wandb_kwargs["name"] = args.wandb_run_name
+        wandb_run = wandb.init(**wandb_kwargs)
 
     context_split = args.eval_split if args.eval_split else args.train_split
     context_cache = TaskContextCache(Path(args.data_root), split=context_split)
@@ -423,8 +558,11 @@ def train(args: argparse.Namespace) -> None:
     max_steps = args.rl_max_steps if args.rl_max_steps > 0 else None
     global_step = 0
     train_start = time.time()
+    vis_dir = Path(args.rl_vis_dir) if args.rl_vis_dir else None
     for epoch in range(args.rl_epochs):
         for batch in eval_loader:
+            next_step = global_step + 1
+            should_visualize = args.rl_vis_every > 0 and next_step % args.rl_vis_every == 0 and args.rl_vis_samples > 0
             policy_model.eval()
             rollout = collect_rollout(
                 model=policy_model,
@@ -436,6 +574,9 @@ def train(args: argparse.Namespace) -> None:
                 action_mask_mode=args.rl_action_mask,
                 temperature=args.rl_temperature,
                 device=device,
+                collect_visualizations=should_visualize,
+                max_visualizations=args.rl_vis_samples,
+                visualization_context=args.rl_vis_max_context,
             )
             policy_model.train()
             stats = run_grpo_update(
@@ -450,15 +591,23 @@ def train(args: argparse.Namespace) -> None:
                 grad_clip=args.rl_grad_clip,
             )
             global_step += 1
+            elapsed = time.time() - train_start
+
+            if vis_dir is not None and rollout.visualizations:
+                save_visualizations_locally(
+                    visualizations=rollout.visualizations,
+                    output_dir=vis_dir,
+                    step=global_step,
+                )
 
             if args.rl_log_every > 0 and global_step % args.rl_log_every == 0:
-                elapsed = time.time() - train_start
                 print(
                     " | ".join(
                         [
                             f"epoch={epoch}",
                             f"step={global_step}",
                             f"reward={rollout.mean_reward:.4f}",
+                            f"reward_std={rollout.std_reward:.4f}",
                             f"yes_logit={rollout.mean_yes_logit:.4f}",
                             f"no_logit={rollout.mean_no_logit:.4f}",
                             f"policy_loss={stats['policy_loss']:.4f}",
@@ -467,6 +616,15 @@ def train(args: argparse.Namespace) -> None:
                             f"elapsed={elapsed:.1f}s",
                         ]
                     )
+                )
+            if wandb_run is not None:
+                log_to_wandb(
+                    wandb_run=wandb_run,
+                    step=global_step,
+                    epoch=epoch,
+                    elapsed=elapsed,
+                    rollout=rollout,
+                    stats=stats,
                 )
 
             if args.rl_save_every > 0 and global_step % args.rl_save_every == 0:
@@ -492,6 +650,8 @@ def train(args: argparse.Namespace) -> None:
         step=global_step,
         args=args,
     )
+    if wandb_run is not None:
+        wandb_run.finish()
     print(f"Saved RL checkpoint to {args.rl_save_path}")
 
 
