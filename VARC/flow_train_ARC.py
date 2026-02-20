@@ -12,6 +12,11 @@ import torch.nn.functional as F
 
 from src.ARC_FlowViT import ARCFlowViT
 from src.ARC_context_flow_loader import build_flow_context_dataloaders
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):  # type: ignore
+        return iterable
 
 try:
     import wandb
@@ -197,7 +202,8 @@ def evaluate_last_frame_accuracy(
     sample_total = 0
     sample_correct = 0
 
-    for batch in loader:
+    eval_iterator = tqdm(loader, desc="eval", total=len(loader), leave=False)
+    for batch in eval_iterator:
         frames = batch["frames"].to(device)
         frame_valid_mask = batch["frame_valid_mask"].to(device)
         target_frame_index = batch["target_frame_index"].to(device)
