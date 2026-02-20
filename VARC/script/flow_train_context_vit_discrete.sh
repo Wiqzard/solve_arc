@@ -24,4 +24,6 @@ python flow_train_discrete_ARC.py \
   --best-save-path "saves/flow_context_vit_discrete/checkpoint_best.pt" \
   --use-wandb \
   --wandb-project "VisionARC" \
+  --wandb-num-vis-samples 8 \
+  --wandb-vis-scale 8 \
   --wandb-run-name "flow-context-vit-discrete"

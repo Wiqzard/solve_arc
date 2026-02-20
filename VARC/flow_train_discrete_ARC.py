@@ -4,7 +4,7 @@ import argparse
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -83,11 +83,162 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-project", type=str, default="VisionARC")
     parser.add_argument("--wandb-run-name", type=str, default="flow-context-vit-discrete")
+    parser.add_argument(
+        "--wandb-num-vis-samples",
+        type=int,
+        default=8,
+        help="Number of eval episodes to visualize and log to W&B each eval.",
+    )
+    parser.add_argument(
+        "--wandb-vis-scale",
+        type=int,
+        default=8,
+        help="Pixel upscale factor for logged ARC image panels.",
+    )
     return parser.parse_args()
 
 
 def one_hot_frames(frames: torch.Tensor, num_colors: int) -> torch.Tensor:
     return F.one_hot(frames.long(), num_classes=num_colors).float()
+
+
+ARC_PALETTE = np.asarray(
+    [
+        [0, 0, 0],
+        [0, 116, 217],
+        [255, 65, 54],
+        [46, 204, 64],
+        [255, 220, 0],
+        [170, 170, 170],
+        [240, 18, 190],
+        [255, 133, 27],
+        [127, 219, 255],
+        [135, 12, 37],
+        [255, 255, 255],
+        [111, 111, 111],
+    ],
+    dtype=np.uint8,
+)
+INVALID_COLOR = np.asarray([225, 225, 225], dtype=np.uint8)
+
+
+def panel_order_string(num_demos: int) -> str:
+    parts: List[str] = []
+    for demo_id in range(1, num_demos + 1):
+        parts.extend([f"D{demo_id}-in", f"D{demo_id}-out"])
+    parts.extend(["Q-in", "Pred", "GT"])
+    return ",".join(parts)
+
+
+def render_grid_rgb(
+    grid: torch.Tensor,
+    valid_mask: torch.Tensor,
+    *,
+    scale: int,
+    num_colors: int,
+) -> np.ndarray:
+    grid_np = grid.detach().cpu().numpy().astype(np.int64)
+    mask_np = valid_mask.detach().cpu().numpy().astype(bool)
+    palette = ARC_PALETTE
+    if num_colors > palette.shape[0]:
+        repeats = (num_colors + palette.shape[0] - 1) // palette.shape[0]
+        palette = np.tile(palette, (repeats, 1))
+    rgb = palette[np.clip(grid_np, 0, num_colors - 1)]
+    rgb[~mask_np] = INVALID_COLOR
+    rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
+    return rgb
+
+
+def make_image_row(images: List[np.ndarray], gap: int = 4) -> np.ndarray:
+    if not images:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    h = max(img.shape[0] for img in images)
+    w = sum(img.shape[1] for img in images) + gap * max(len(images) - 1, 0)
+    canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+    cursor = 0
+    for img in images:
+        ih, iw = img.shape[:2]
+        canvas[:ih, cursor : cursor + iw] = img
+        cursor += iw + gap
+    return canvas
+
+
+def make_image_grid(images: List[np.ndarray], cols: int = 4, gap: int = 4) -> np.ndarray:
+    if not images:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    rows: List[np.ndarray] = []
+    for start in range(0, len(images), cols):
+        rows.append(make_image_row(images[start : start + cols], gap=gap))
+    w = max(row.shape[1] for row in rows)
+    h = sum(row.shape[0] for row in rows) + gap * max(len(rows) - 1, 0)
+    canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+    cursor = 0
+    for row in rows:
+        rh, rw = row.shape[:2]
+        canvas[cursor : cursor + rh, :rw] = row
+        cursor += rh + gap
+    return canvas
+
+
+def build_eval_visualization(
+    *,
+    frames: torch.Tensor,
+    frame_valid_mask: torch.Tensor,
+    prediction: torch.Tensor,
+    target_output: torch.Tensor,
+    target_valid_mask: torch.Tensor,
+    num_demos: int,
+    scale: int,
+    num_colors: int,
+) -> np.ndarray:
+    panels: List[np.ndarray] = []
+    for demo_idx in range(num_demos):
+        input_idx = 2 * demo_idx
+        output_idx = input_idx + 1
+        panels.append(
+            render_grid_rgb(
+                frames[input_idx],
+                frame_valid_mask[input_idx],
+                scale=scale,
+                num_colors=num_colors,
+            )
+        )
+        panels.append(
+            render_grid_rgb(
+                frames[output_idx],
+                frame_valid_mask[output_idx],
+                scale=scale,
+                num_colors=num_colors,
+            )
+        )
+
+    query_input_idx = 2 * num_demos
+    panels.append(
+        render_grid_rgb(
+            frames[query_input_idx],
+            frame_valid_mask[query_input_idx],
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+    panels.append(
+        render_grid_rgb(
+            prediction,
+            target_valid_mask,
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+    panels.append(
+        render_grid_rgb(
+            target_output,
+            target_valid_mask,
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+
+    return make_image_grid(panels, cols=4, gap=4)
 
 
 def sample_frame_times(
@@ -250,14 +401,16 @@ def evaluate_last_frame_accuracy(
     sample_steps: int,
     beta: float,
     reverse_sampler: str,
-) -> Dict[str, float]:
+    collect_examples: int = 0,
+) -> tuple[Dict[str, float], List[Dict[str, Any]]]:
     if loader is None:
-        return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}
+        return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}, []
 
     task_total: Dict[str, int] = {}
     task_correct: Dict[str, int] = {}
     sample_total = 0
     sample_correct = 0
+    examples: List[Dict[str, Any]] = []
 
     for batch in loader:
         frames = batch["frames"].to(device)
@@ -266,6 +419,7 @@ def evaluate_last_frame_accuracy(
         target_output = batch["target_output"].to(device)
         target_valid_mask = batch["target_valid_mask"].to(device)
         task_names = batch["task_names"]
+        query_indices = batch["query_indices"]
 
         prediction = denoise_last_solution_frame_discrete(
             model,
@@ -288,12 +442,25 @@ def evaluate_last_frame_accuracy(
             task_correct[task_name] = task_correct.get(task_name, 0) + int(is_correct)
             sample_total += 1
             sample_correct += int(is_correct)
+            if len(examples) < collect_examples:
+                examples.append(
+                    {
+                        "task_name": task_name,
+                        "query_index": int(query_indices[i].item()),
+                        "is_correct": is_correct,
+                        "frames": frames[i].detach().cpu(),
+                        "frame_valid_mask": frame_valid_mask[i].detach().cpu(),
+                        "prediction": prediction[i].detach().cpu(),
+                        "target_output": target_output[i].detach().cpu(),
+                        "target_valid_mask": target_valid_mask[i].detach().cpu(),
+                    }
+                )
 
     sample_acc = sample_correct / max(sample_total, 1)
     task_acc = 0.0
     if task_total:
         task_acc = float(np.mean([task_correct[name] / task_total[name] for name in task_total]))
-    return {"sample_acc": sample_acc, "task_acc": task_acc, "samples": float(sample_total)}
+    return {"sample_acc": sample_acc, "task_acc": task_acc, "samples": float(sample_total)}, examples
 
 
 def save_checkpoint(
@@ -452,7 +619,7 @@ def train(args: argparse.Namespace) -> None:
         }
 
         if args.eval_every > 0 and (epoch % args.eval_every == 0):
-            eval_metrics = evaluate_last_frame_accuracy(
+            eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                 model,
                 eval_loader if eval_loader is not None else train_loader,
                 device=device,
@@ -460,6 +627,7 @@ def train(args: argparse.Namespace) -> None:
                 sample_steps=args.sample_steps,
                 beta=args.discrete_rate,
                 reverse_sampler=args.reverse_sampler,
+                collect_examples=args.wandb_num_vis_samples if wandb_run is not None else 0,
             )
             log_data.update(
                 {
@@ -477,6 +645,26 @@ def train(args: argparse.Namespace) -> None:
                     args=args,
                     metrics=eval_metrics,
                 )
+            if wandb_run is not None and eval_examples:
+                viz_images = []
+                for sample in eval_examples:
+                    image = build_eval_visualization(
+                        frames=sample["frames"],
+                        frame_valid_mask=sample["frame_valid_mask"],
+                        prediction=sample["prediction"],
+                        target_output=sample["target_output"],
+                        target_valid_mask=sample["target_valid_mask"],
+                        num_demos=args.num_demos,
+                        scale=max(int(args.wandb_vis_scale), 1),
+                        num_colors=args.num_colors,
+                    )
+                    caption = (
+                        f"task={sample['task_name']} | query={sample['query_index']} | "
+                        f"correct={int(sample['is_correct'])} | order={panel_order_string(args.num_demos)}"
+                    )
+                    viz_images.append(wandb.Image(image, caption=caption))
+                wandb_run.log({"eval/generations": viz_images}, step=global_step)
+                wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
 
         print(
             " | ".join(

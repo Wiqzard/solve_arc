@@ -270,9 +270,17 @@ python flow_train_discrete_ARC.py \
   --discrete-rate 5.0 \
   --reverse-sampler sample \
   --sample-steps 40 \
+  --wandb-num-vis-samples 8 \
+  --wandb-vis-scale 8 \
   --save-path saves/flow_context_vit_discrete/checkpoint_last.pt \
   --best-save-path saves/flow_context_vit_discrete/checkpoint_best.pt
 ```
+
+When `--use-wandb` is enabled, eval logs also include generated sample panels (`eval/generations`) with:
+- demo input/output pairs
+- query input
+- predicted output
+- ground-truth output
 
 ### Important hyperparameters
 
