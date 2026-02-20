@@ -31,6 +31,8 @@ class ARCContextFlowDataset(Dataset):
         image_size: int,
         num_colors: int,
         seed: int = 42,
+        translation_augmentation: bool = True,
+        resolution_augmentation: bool = True,
     ) -> None:
         if mode not in {"train", "eval"}:
             raise ValueError("mode must be 'train' or 'eval'.")
@@ -41,6 +43,8 @@ class ARCContextFlowDataset(Dataset):
         self.image_size = image_size
         self.num_colors = num_colors
         self.seed = seed
+        self.translation_augmentation = translation_augmentation
+        self.resolution_augmentation = resolution_augmentation
 
         split_dir = self.root / "data" / split
         files = sorted(split_dir.glob("*.json"))
@@ -105,14 +109,58 @@ class ARCContextFlowDataset(Dataset):
             return False
         return self._is_valid_grid(example["input"]) and self._is_valid_grid(example["output"])
 
-    def _pad_grid(self, grid: Sequence[Sequence[int]]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _pad_grid(
+        self,
+        grid: Sequence[Sequence[int]],
+        *,
+        x_offset: int = 0,
+        y_offset: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         canvas = torch.zeros((self.image_size, self.image_size), dtype=torch.long)
         mask = torch.zeros((self.image_size, self.image_size), dtype=torch.bool)
         array = torch.tensor(grid, dtype=torch.long)
         height, width = array.shape
-        canvas[:height, :width] = array
-        mask[:height, :width] = True
+        canvas[y_offset : y_offset + height, x_offset : x_offset + width] = array
+        mask[y_offset : y_offset + height, x_offset : x_offset + width] = True
         return canvas, mask
+
+    def _augment_example_pair(
+        self,
+        example: Dict[str, Any],
+        *,
+        rng: random.Random | Any,
+    ) -> Dict[str, List[List[int]]]:
+        input_grid = np.asarray(example["input"], dtype=np.int64)
+        output_grid = np.asarray(example["output"], dtype=np.int64)
+        max_cur_y = max(input_grid.shape[0], output_grid.shape[0])
+        max_cur_x = max(input_grid.shape[1], output_grid.shape[1])
+
+        scale_factor = 1
+        if self.mode == "train" and self.resolution_augmentation:
+            max_len = max(max_cur_x, max_cur_y)
+            max_scale_factor = max(self.image_size // max_len, 1)
+            scale_factor = int(rng.randint(1, max_scale_factor))
+            if scale_factor > 1:
+                input_grid = np.repeat(np.repeat(input_grid, scale_factor, axis=0), scale_factor, axis=1)
+                output_grid = np.repeat(np.repeat(output_grid, scale_factor, axis=0), scale_factor, axis=1)
+
+        scaled_h = max_cur_y * scale_factor
+        scaled_w = max_cur_x * scale_factor
+
+        x_offset = 0
+        y_offset = 0
+        if self.mode == "train" and self.translation_augmentation:
+            max_x_offset = max(self.image_size - scaled_w, 0)
+            max_y_offset = max(self.image_size - scaled_h, 0)
+            x_offset = int(rng.randint(0, max_x_offset)) if max_x_offset > 0 else 0
+            y_offset = int(rng.randint(0, max_y_offset)) if max_y_offset > 0 else 0
+
+        return {
+            "input": input_grid.tolist(),
+            "output": output_grid.tolist(),
+            "x_offset": x_offset,
+            "y_offset": y_offset,
+        }
 
     def _select_demo_indices(
         self,
@@ -155,13 +203,23 @@ class ARCContextFlowDataset(Dataset):
 
         for demo_idx in demo_indices:
             demo = train_examples[demo_idx]
-            x_frame, x_mask = self._pad_grid(demo["input"])
-            y_frame, y_mask = self._pad_grid(demo["output"])
+            aug_demo = self._augment_example_pair(demo, rng=rng)
+            x_frame, x_mask = self._pad_grid(aug_demo["input"], x_offset=aug_demo["x_offset"], y_offset=aug_demo["y_offset"])
+            y_frame, y_mask = self._pad_grid(aug_demo["output"], x_offset=aug_demo["x_offset"], y_offset=aug_demo["y_offset"])
             frames.extend([x_frame, y_frame])
             frame_masks.extend([x_mask, y_mask])
 
-        query_input_frame, query_input_mask = self._pad_grid(query_example["input"])
-        query_output_frame, query_output_mask = self._pad_grid(query_example["output"])
+        aug_query = self._augment_example_pair(query_example, rng=rng)
+        query_input_frame, query_input_mask = self._pad_grid(
+            aug_query["input"],
+            x_offset=aug_query["x_offset"],
+            y_offset=aug_query["y_offset"],
+        )
+        query_output_frame, query_output_mask = self._pad_grid(
+            aug_query["output"],
+            x_offset=aug_query["x_offset"],
+            y_offset=aug_query["y_offset"],
+        )
         frames.extend([query_input_frame, query_output_frame])
         frame_masks.extend([query_input_mask, query_output_mask])
 
@@ -215,6 +273,8 @@ def build_flow_context_dataloaders(
     Optional[DistributedSampler],
 ]:
     root = Path(args.data_root)
+    train_translation_aug = bool(getattr(args, "flow_train_translation_aug", True))
+    train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", True))
     train_dataset = ARCContextFlowDataset(
         root=root,
         split=args.train_split,
@@ -223,6 +283,8 @@ def build_flow_context_dataloaders(
         image_size=args.image_size,
         num_colors=args.num_colors,
         seed=args.seed,
+        translation_augmentation=train_translation_aug,
+        resolution_augmentation=train_resolution_aug,
     )
     train_sampler: Optional[DistributedSampler] = None
     if distributed:
@@ -254,6 +316,8 @@ def build_flow_context_dataloaders(
             image_size=args.image_size,
             num_colors=args.num_colors,
             seed=args.seed,
+            translation_augmentation=False,
+            resolution_augmentation=False,
         )
         if distributed:
             eval_sampler = DistributedSampler(

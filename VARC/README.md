@@ -201,6 +201,9 @@ Training objective:
 - Path: `x_t = (1 - t_f) * x_0 + t_f * eps`
 - Target velocity: `v* = eps - x_0`
 - Default loss applies to all frames; pass `--loss-on-target-only` to train only on the final solution frame.
+- Train data augmentation is on by default in this flow pipeline:
+  - random translation + random resolution scaling per `(input, output)` pair
+  - disable with `--no-flow-train-translation-aug --no-flow-train-resolution-aug`
 
 Evaluation:
 - Keep demo frames and query input clean
@@ -260,6 +263,7 @@ This repo also includes `flow_train_discrete_ARC.py`, which keeps the same conte
 
 Discrete training path:
 - Sample per-frame noise levels `t_f` independently.
+- Uses the same default train-time pair augmentation as above (translation + resolution scaling).
 - Build a mixture discrete path with a uniform source token and clean ARC token target:
   - `sigma_t = exp(-beta * t)` (`--discrete-rate = beta`)
   - sample `x_t = x_0` with probability `sigma_t`, else `x_t = x_1`

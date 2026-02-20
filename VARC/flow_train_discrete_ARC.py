@@ -118,6 +118,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")
     parser.add_argument("--bf16-autocast", action="store_true", help="Enable bfloat16 autocast on CUDA.")
+    parser.add_argument(
+        "--flow-train-translation-aug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable random translation augmentation for flow train episodes.",
+    )
+    parser.add_argument(
+        "--flow-train-resolution-aug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable random resolution scaling augmentation for flow train episodes.",
+    )
 
     parser.add_argument(
         "--loss-on-target-only",
