@@ -15,12 +15,12 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_A
   --depth 10 \
   --num-heads 8 \
   --mlp-ratio 4.0 \
-  --dropout 0.1 \
+  --dropout 0.0 \
   --no-framewise-causal-attention \
   --attention-backend "auto" \
-  --batch-size 16 \
+  --batch-size 4 \
   --eval-batch-size 8 \
-  --log-every-steps 25 \
+  --log-every-steps 5 \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
