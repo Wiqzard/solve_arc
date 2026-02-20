@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import time
 from pathlib import Path
@@ -8,7 +9,9 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.ARC_FlowViT import ARCFlowViT
 from src.ARC_context_flow_loader import build_flow_context_dataloaders
@@ -29,6 +32,41 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def setup_distributed(args: argparse.Namespace) -> tuple[bool, int, int, int, torch.device]:
+    env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = bool(args.ddp or env_world_size > 1)
+    if not distributed:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return False, 0, 0, 1, device
+
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        raise RuntimeError("DDP requires torchrun environment variables RANK and WORLD_SIZE.")
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ["WORLD_SIZE"])
+    backend = args.dist_backend
+    if backend == "nccl" and not torch.cuda.is_available():
+        backend = "gloo"
+
+    dist.init_process_group(backend=backend, init_method=args.dist_url)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+    return True, rank, local_rank, world_size, device
+
+
+def cleanup_distributed(distributed: bool) -> None:
+    if distributed and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if isinstance(model, DDP) else model
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +107,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
+    parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
+    parser.add_argument("--dist-url", type=str, default="env://")
 
     parser.add_argument(
         "--loss-on-target-only",
@@ -492,8 +533,9 @@ def save_checkpoint(
     metrics: Optional[Dict[str, float]] = None,
 ) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    model_to_save = unwrap_model(model)
     payload = {
-        "model_state": model.state_dict(),
+        "model_state": model_to_save.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "epoch": epoch,
         "args": vars(args),
@@ -503,17 +545,24 @@ def save_checkpoint(
 
 
 def train(args: argparse.Namespace) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    set_seed(args.seed)
+    distributed, rank, local_rank, world_size, device = setup_distributed(args)
+    is_main = rank == 0
+    set_seed(args.seed + rank)
 
-    train_dataset, train_loader, eval_dataset, eval_loader = build_flow_context_dataloaders(args)
+    train_dataset, train_loader, eval_dataset, eval_loader, train_sampler = build_flow_context_dataloaders(
+        args,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+    )
     max_frames = 2 * args.num_demos + 2
     context_length = 2 * args.num_demos * (args.image_size * args.image_size)
-    print(f"Discrete flow context tokens (demo-only): {context_length}")
-    print(f"Full sequence tokens with query pair: {max_frames * (args.image_size * args.image_size)}")
-    print(f"Train episodes: {len(train_dataset)}")
-    if eval_dataset is not None:
-        print(f"Eval episodes: {len(eval_dataset)}")
+    if is_main:
+        print(f"Discrete flow context tokens (demo-only): {context_length}")
+        print(f"Full sequence tokens with query pair: {max_frames * (args.image_size * args.image_size)}")
+        print(f"Train episodes: {len(train_dataset)}")
+        if eval_dataset is not None:
+            print(f"Eval episodes: {len(eval_dataset)}")
 
     model = ARCFlowViT(
         image_size=args.image_size,
@@ -527,6 +576,13 @@ def train(args: argparse.Namespace) -> None:
         framewise_causal_attention=args.framewise_causal_attention,
         attention_backend=args.attention_backend,
     ).to(device)
+    if distributed:
+        model = DDP(
+            model,
+            device_ids=[local_rank] if device.type == "cuda" else None,
+            output_device=local_rank if device.type == "cuda" else None,
+            find_unused_parameters=False,
+        )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -535,7 +591,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     wandb_run = None
-    if args.use_wandb:
+    if args.use_wandb and is_main:
         if wandb is None:
             raise RuntimeError("wandb is not installed. Install it or disable --use-wandb.")
         wandb_run = wandb.init(
@@ -547,6 +603,8 @@ def train(args: argparse.Namespace) -> None:
     best_task_acc = float("-inf")
     global_step = 0
     for epoch in range(1, args.epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         epoch_start = time.time()
         running_loss = 0.0
@@ -602,7 +660,7 @@ def train(args: argparse.Namespace) -> None:
             step_loss_accum += loss_value
             step_loss_count += 1
 
-            if args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
+            if is_main and args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
                 step_avg_loss = step_loss_accum / max(step_loss_count, 1)
                 elapsed = time.time() - epoch_start
                 print(
@@ -630,6 +688,12 @@ def train(args: argparse.Namespace) -> None:
                 step_loss_accum = 0.0
                 step_loss_count = 0
 
+        if distributed:
+            totals = torch.tensor([running_loss, float(seen)], device=device)
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+            running_loss = float(totals[0].item())
+            seen = int(totals[1].item())
+
         train_loss = running_loss / max(seen, 1)
         epoch_time = time.time() - epoch_start
         log_data: Dict[str, Any] = {
@@ -639,7 +703,10 @@ def train(args: argparse.Namespace) -> None:
             "lr": optimizer.param_groups[0]["lr"],
         }
 
-        if args.eval_every > 0 and (epoch % args.eval_every == 0):
+        should_eval = args.eval_every > 0 and (epoch % args.eval_every == 0)
+        if should_eval and distributed:
+            dist.barrier()
+        if should_eval and is_main:
             eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                 model,
                 eval_loader if eval_loader is not None else train_loader,
@@ -686,34 +753,38 @@ def train(args: argparse.Namespace) -> None:
                     viz_images.append(wandb.Image(image, caption=caption))
                 wandb_run.log({"eval/generations": viz_images}, step=global_step)
                 wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
+        if should_eval and distributed:
+            dist.barrier()
 
-        print(
-            " | ".join(
-                [
-                    f"epoch={log_data['epoch']}",
-                    f"loss={log_data['train_loss']:.6f}",
-                    f"time={log_data['epoch_time']:.1f}s",
-                    f"lr={log_data['lr']:.6f}",
-                    f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
-                    f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
-                ]
+        if is_main:
+            print(
+                " | ".join(
+                    [
+                        f"epoch={log_data['epoch']}",
+                        f"loss={log_data['train_loss']:.6f}",
+                        f"time={log_data['epoch_time']:.1f}s",
+                        f"lr={log_data['lr']:.6f}",
+                        f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
+                        f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
+                    ]
+                )
             )
-        )
 
-        if wandb_run is not None:
-            wandb_run.log(log_data, step=global_step)
+            if wandb_run is not None:
+                wandb_run.log(log_data, step=global_step)
 
-        save_checkpoint(
-            save_path=Path(args.save_path),
-            model=model,
-            optimizer=optimizer,
-            epoch=epoch,
-            args=args,
-            metrics=log_data,
-        )
+            save_checkpoint(
+                save_path=Path(args.save_path),
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                args=args,
+                metrics=log_data,
+            )
 
     if wandb_run is not None:
         wandb_run.finish()
+    cleanup_distributed(distributed)
 
 
 if __name__ == "__main__":

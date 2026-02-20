@@ -216,6 +216,20 @@ Run:
 bash script/flow_train_context_vit.sh
 ```
 
+DDP run (`torchrun`, 4 GPUs example):
+```
+torchrun --nproc_per_node=4 flow_train_ARC.py \
+  --ddp \
+  --data-root raw_data/ARC-AGI \
+  --train-split training \
+  --eval-split evaluation \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --epochs 20 \
+  --learning-rate 2e-4
+```
+
 Direct command:
 ```
 python flow_train_ARC.py \
@@ -261,6 +275,21 @@ Evaluation:
 Run:
 ```
 bash script/flow_train_context_vit_discrete.sh
+```
+
+DDP run (`torchrun`, 4 GPUs example):
+```
+torchrun --nproc_per_node=4 flow_train_discrete_ARC.py \
+  --ddp \
+  --data-root raw_data/ARC-AGI \
+  --train-split training \
+  --eval-split evaluation \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --epochs 20 \
+  --learning-rate 2e-4 \
+  --discrete-rate 5.0
 ```
 
 Direct command:

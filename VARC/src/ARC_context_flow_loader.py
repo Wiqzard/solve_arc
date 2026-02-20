@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 
 def _grid_shape(grid: Sequence[Sequence[int]]) -> Tuple[int, int]:
@@ -201,7 +202,17 @@ def collate_flow_context(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def build_flow_context_dataloaders(
     args: argparse.Namespace,
-) -> Tuple[ARCContextFlowDataset, DataLoader, Optional[ARCContextFlowDataset], Optional[DataLoader]]:
+    *,
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+) -> Tuple[
+    ARCContextFlowDataset,
+    DataLoader,
+    Optional[ARCContextFlowDataset],
+    Optional[DataLoader],
+    Optional[DistributedSampler],
+]:
     root = Path(args.data_root)
     train_dataset = ARCContextFlowDataset(
         root=root,
@@ -212,10 +223,19 @@ def build_flow_context_dataloaders(
         num_colors=args.num_colors,
         seed=args.seed,
     )
+    train_sampler: Optional[DistributedSampler] = None
+    if distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+        )
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         collate_fn=collate_flow_context,
         drop_last=False,
@@ -241,4 +261,4 @@ def build_flow_context_dataloaders(
             collate_fn=collate_flow_context,
             drop_last=False,
         )
-    return train_dataset, train_loader, eval_dataset, eval_loader
+    return train_dataset, train_loader, eval_dataset, eval_loader, train_sampler
