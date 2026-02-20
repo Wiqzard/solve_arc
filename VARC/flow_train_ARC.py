@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--loss-on-target-only",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
         help="Apply flow-matching loss only on the final solution frame.",
     )
     parser.add_argument("--min-noise-level", type=float, default=1e-3)

@@ -200,7 +200,7 @@ Training objective:
 - Flow matching with per-frame independent noise levels `t_f`
 - Path: `x_t = (1 - t_f) * x_0 + t_f * eps`
 - Target velocity: `v* = eps - x_0`
-- Default loss applies to the final solution frame only (`--loss-on-target-only`)
+- Default loss applies to all frames; pass `--loss-on-target-only` to train only on the final solution frame.
 
 Evaluation:
 - Keep demo frames and query input clean
@@ -227,7 +227,6 @@ python flow_train_ARC.py \
   --num-colors 12 \
   --epochs 20 \
   --learning-rate 2e-4 \
-  --loss-on-target-only \
   --framewise-causal-attention \
   --attention-backend flex \
   --sample-steps 40 \
@@ -246,6 +245,7 @@ Discrete training path:
 - Model predicts logits for `p_theta(x_1 | x_t, t)` over colors.
 - Loss uses the generalized KL form from `flow_matching` (`MixturePathGeneralizedKL`) on valid pixels:
   - `-beta * [ p_theta(x_t|x_t,t) - delta_{x_t,x_1} + (1-delta_{x_t,x_1}) log p_theta(x_1|x_t,t) ]`
+  - default trains on all frames; pass `--loss-on-target-only` to train only on the final solution frame
 - Sampling uses a discrete Euler update equivalent to `MixtureDiscreteEulerSolver`:
   - choose proposal `x_1` from logits (`--reverse-sampler sample|argmax`)
   - apply jump probability `1 - exp(-beta * dt)` per step on the target frame
@@ -274,7 +274,6 @@ python flow_train_discrete_ARC.py \
   --num-colors 12 \
   --epochs 20 \
   --learning-rate 2e-4 \
-  --loss-on-target-only \
   --discrete-rate 5.0 \
   --framewise-causal-attention \
   --attention-backend flex \

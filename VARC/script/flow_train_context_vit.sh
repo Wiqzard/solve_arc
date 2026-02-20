@@ -18,7 +18,6 @@ python flow_train_ARC.py \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
-  --loss-on-target-only \
   --sample-steps 40 \
   --save-path "saves/flow_context_vit/checkpoint_last.pt" \
   --best-save-path "saves/flow_context_vit/checkpoint_best.pt" \
