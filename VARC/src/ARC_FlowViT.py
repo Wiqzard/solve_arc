@@ -253,6 +253,7 @@ class ARCFlowViT(nn.Module):
         self.embed_dim = embed_dim
         self.framewise_causal_attention = framewise_causal_attention
         self.attention_backend = attention_backend
+        self.depth = depth
 
         self.input_proj = nn.Linear(num_colors, embed_dim)
         self.frame_embed = nn.Embedding(max_frames, embed_dim)
@@ -260,11 +261,16 @@ class ARCFlowViT(nn.Module):
         token_frame_index = torch.arange(max_frames, dtype=torch.long).repeat_interleave(self.spatial_tokens)
         self.register_buffer("token_frame_index", token_frame_index, persistent=False)
 
-        self.time_embed = nn.Sequential(
-            SinusoidalTimeEmbedding(embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, embed_dim),
+        self.time_embed_base = SinusoidalTimeEmbedding(embed_dim)
+        self.time_embed_layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(embed_dim, embed_dim),
+                    nn.SiLU(),
+                    nn.Linear(embed_dim, embed_dim),
+                )
+                for _ in range(depth)
+            ]
         )
 
         if framewise_causal_attention:
@@ -280,20 +286,22 @@ class ARCFlowViT(nn.Module):
                     for _ in range(depth)
                 ]
             )
-            self.encoder = None
         else:
             ff_dim = int(embed_dim * mlp_ratio)
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=embed_dim,
-                nhead=num_heads,
-                dim_feedforward=ff_dim,
-                dropout=dropout,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
+            self.encoder_layers = nn.ModuleList(
+                [
+                    nn.TransformerEncoderLayer(
+                        d_model=embed_dim,
+                        nhead=num_heads,
+                        dim_feedforward=ff_dim,
+                        dropout=dropout,
+                        activation="gelu",
+                        batch_first=True,
+                        norm_first=True,
+                    )
+                    for _ in range(depth)
+                ]
             )
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
-            self.encoder_layers = None
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, num_colors)
 
@@ -330,10 +338,8 @@ class ARCFlowViT(nn.Module):
         tokens = tokens + self.frame_embed(frame_ids)
         tokens = tokens + self.spatial_embed[:, None, :, :]
 
-        time_tokens = self.time_embed(frame_times.reshape(-1)).reshape(batch_size, frames, 1, self.embed_dim)
-        tokens = tokens + time_tokens
-
         tokens = tokens.reshape(batch_size, frames * self.spatial_tokens, self.embed_dim)
+        frame_index_per_token = self.token_frame_index[: frames * self.spatial_tokens]
 
         key_padding_mask = None
         if frame_valid_mask is not None:
@@ -341,17 +347,21 @@ class ARCFlowViT(nn.Module):
                 raise ValueError("frame_valid_mask shape mismatch")
             key_padding_mask = ~frame_valid_mask.reshape(batch_size, frames * self.spatial_tokens).bool()
 
-        if self.framewise_causal_attention:
-            frame_index_per_token = self.token_frame_index[: frames * self.spatial_tokens]
-            encoded = tokens
-            for layer in self.encoder_layers:
+        base_time_embed = self.time_embed_base(frame_times.reshape(-1)).reshape(batch_size, frames, self.embed_dim)
+        encoded = tokens
+        for layer_idx, layer in enumerate(self.encoder_layers):
+            layer_time_embed = self.time_embed_layers[layer_idx](
+                base_time_embed.reshape(-1, self.embed_dim)
+            ).reshape(batch_size, frames, self.embed_dim)
+            encoded = encoded + layer_time_embed[:, frame_index_per_token, :]
+            if self.framewise_causal_attention:
                 encoded = layer(
                     encoded,
                     frame_index_per_token=frame_index_per_token,
                     key_padding_mask=key_padding_mask,
                 )
-        else:
-            encoded = self.encoder(tokens, src_key_padding_mask=key_padding_mask)
+            else:
+                encoded = layer(encoded, src_key_padding_mask=key_padding_mask)
         encoded = self.norm(encoded)
         velocity = self.head(encoded)
         velocity = velocity.reshape(batch_size, frames, height, width, self.num_colors)
