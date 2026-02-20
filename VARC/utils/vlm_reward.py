@@ -172,12 +172,17 @@ def _resolve_model_class():
     raise RuntimeError("Unable to resolve a compatible transformers AutoModel class for VLM reward scoring.")
 
 
-def _select_single_token_id(tokenizer, candidates: Sequence[str], label: str) -> int:
+def _collect_single_token_ids(tokenizer, candidates: Sequence[str], label: str) -> List[int]:
+    ids: List[int] = []
     for candidate in candidates:
         token_ids = tokenizer.encode(candidate, add_special_tokens=False)
         if len(token_ids) == 1:
-            return int(token_ids[0])
-    raise ValueError(f"Could not find a single-token representation for '{label}'.")
+            token_id = int(token_ids[0])
+            if token_id not in ids:
+                ids.append(token_id)
+    if not ids:
+        raise ValueError(f"Could not find a single-token representation for '{label}'.")
+    return ids
 
 
 @dataclass
@@ -222,8 +227,16 @@ class QwenYesNoRewardModel:
         if tokenizer is None:
             raise RuntimeError("Reward model processor does not expose a tokenizer; cannot compute yes/no logits.")
         self.tokenizer = tokenizer
-        self.yes_token_id = _select_single_token_id(self.tokenizer, (" yes", "yes", " Yes", "Yes"), "yes")
-        self.no_token_id = _select_single_token_id(self.tokenizer, (" no", "no", " No", "No"), "no")
+        self.yes_token_ids = _collect_single_token_ids(
+            self.tokenizer,
+            (" yes", "yes", " Yes", "Yes", "\nyes", "\nYes"),
+            "yes",
+        )
+        self.no_token_ids = _collect_single_token_ids(
+            self.tokenizer,
+            (" no", "no", " No", "No", "\nno", "\nNo"),
+            "no",
+        )
 
     def _build_inputs(self, prompt: str, image: Optional[Image.Image]) -> Dict[str, torch.Tensor]:
         if image is not None and self.use_image:
@@ -289,6 +302,8 @@ class QwenYesNoRewardModel:
         model_inputs = self._build_inputs(prompt, image)
         outputs = self.model(**model_inputs)
         next_token_logits = outputs.logits[:, -1, :]
-        yes_logit = float(next_token_logits[0, self.yes_token_id].detach().cpu())
-        no_logit = float(next_token_logits[0, self.no_token_id].detach().cpu())
+        yes_slice = next_token_logits[0, self.yes_token_ids]
+        no_slice = next_token_logits[0, self.no_token_ids]
+        yes_logit = float(torch.logsumexp(yes_slice, dim=0).detach().cpu())
+        no_logit = float(torch.logsumexp(no_slice, dim=0).detach().cpu())
         return YesNoReward(reward=yes_logit - no_logit, yes_logit=yes_logit, no_logit=no_logit)

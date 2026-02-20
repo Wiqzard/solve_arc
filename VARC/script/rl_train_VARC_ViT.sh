@@ -20,6 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python rl_train_ARC.py \
   --reward-dtype "bfloat16" \
   --reward-use-image \
   --rl-group-size 4 \
+  --rl-action-mask "target" \
   --rl-update-epochs 2 \
   --rl-beta 0.01 \
   --rl-clip-eps 0.2 \
@@ -27,6 +28,8 @@ CUDA_VISIBLE_DEVICES=0 python rl_train_ARC.py \
   --rl-max-steps 200 \
   --rl-vis-every 10 \
   --rl-vis-samples 4 \
+  --rl-reward-sanity-every 10 \
+  --rl-reward-sanity-samples 2 \
   --rl-vis-dir "outputs/rl_vis/af24b4cc" \
   --use-wandb \
   --wandb-project "VisionARC" \

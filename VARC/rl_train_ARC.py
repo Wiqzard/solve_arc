@@ -46,7 +46,13 @@ def add_rl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rl-beta", type=float, default=0.01, help="KL penalty coefficient.")
     parser.add_argument("--rl-entropy-coef", type=float, default=1e-3)
     parser.add_argument("--rl-update-epochs", type=int, default=2)
-    parser.add_argument("--rl-action-mask", type=str, default="full", choices=("full", "target"))
+    parser.add_argument(
+        "--rl-action-mask",
+        type=str,
+        default="target",
+        choices=("full", "target"),
+        help="Use 'target' to sample only supervised output region; 'full' samples entire canvas.",
+    )
     parser.add_argument("--rl-log-every", type=int, default=1)
     parser.add_argument("--rl-save-every", type=int, default=50)
     parser.add_argument("--rl-save-path", type=str, default="saves/rl_stage/checkpoint_final.pt")
@@ -54,6 +60,18 @@ def add_rl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rl-vis-samples", type=int, default=4, help="Number of sampled rollouts to visualize per logging step.")
     parser.add_argument("--rl-vis-max-context", type=int, default=3, help="Number of demo pairs to include in each visualization.")
     parser.add_argument("--rl-vis-dir", type=str, default="outputs/rl_vis", help="Optional directory for saving rollout visualizations.")
+    parser.add_argument(
+        "--rl-reward-sanity-every",
+        type=int,
+        default=25,
+        help="Compute sampled-vs-ground-truth reward sanity checks every N steps (0 to disable).",
+    )
+    parser.add_argument(
+        "--rl-reward-sanity-samples",
+        type=int,
+        default=2,
+        help="How many rollouts to evaluate against ground-truth reward at sanity steps.",
+    )
     parser.add_argument(
         "--rl-disable-aug",
         action=argparse.BooleanOptionalAction,
@@ -137,6 +155,9 @@ class RolloutVisualization:
     yes_logit: float
     no_logit: float
     example_index: int
+    gt_reward: Optional[float] = None
+    gt_yes_logit: Optional[float] = None
+    gt_no_logit: Optional[float] = None
 
 
 def build_rollout_visualization(
@@ -236,6 +257,8 @@ class RolloutBatch:
     std_reward: float
     mean_yes_logit: float
     mean_no_logit: float
+    gt_reward_mean: Optional[float] = None
+    reward_sanity_gap: Optional[float] = None
     visualizations: List[RolloutVisualization] = field(default_factory=list)
 
 
@@ -253,6 +276,7 @@ def collect_rollout(
     collect_visualizations: bool = False,
     max_visualizations: int = 0,
     visualization_context: int = 3,
+    reward_sanity_samples: int = 0,
 ) -> RolloutBatch:
     inputs = batch["inputs"].to(device)
     attention_mask = batch["attention_mask"].to(device)
@@ -313,6 +337,18 @@ def collect_rollout(
         yes_logits.append(reward.yes_logit)
         no_logits.append(reward.no_logit)
         if collect_visualizations and len(visualizations) < max_visualizations:
+            gt_reward_value: Optional[float] = None
+            gt_yes: Optional[float] = None
+            gt_no: Optional[float] = None
+            if repeated_raw_outputs[i] is not None and len(visualizations) < reward_sanity_samples:
+                gt_reward = reward_model.score_candidate(
+                    train_examples=train_examples,
+                    query_input=query_input,
+                    candidate_output=repeated_raw_outputs[i],
+                )
+                gt_reward_value = float(gt_reward.reward)
+                gt_yes = float(gt_reward.yes_logit)
+                gt_no = float(gt_reward.no_logit)
             viz_image = build_rollout_visualization(
                 train_examples=train_examples,
                 query_input=query_input,
@@ -328,6 +364,9 @@ def collect_rollout(
                     yes_logit=float(reward.yes_logit),
                     no_logit=float(reward.no_logit),
                     example_index=i,
+                    gt_reward=gt_reward_value,
+                    gt_yes_logit=gt_yes,
+                    gt_no_logit=gt_no,
                 )
             )
 
@@ -336,6 +375,15 @@ def collect_rollout(
     grouped_mean = grouped.mean(dim=1, keepdim=True)
     grouped_std = grouped.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-6)
     advantages = ((grouped - grouped_mean) / grouped_std).reshape(-1)
+
+    gt_rewards = [item.gt_reward for item in visualizations if item.gt_reward is not None]
+    sampled_rewards_for_gt = [item.reward for item in visualizations if item.gt_reward is not None]
+    gt_reward_mean: Optional[float] = None
+    reward_sanity_gap: Optional[float] = None
+    if gt_rewards and sampled_rewards_for_gt:
+        gt_reward_mean = float(np.mean(gt_rewards))
+        sampled_mean = float(np.mean(sampled_rewards_for_gt))
+        reward_sanity_gap = gt_reward_mean - sampled_mean
 
     return RolloutBatch(
         inputs=repeated_inputs,
@@ -351,6 +399,8 @@ def collect_rollout(
         std_reward=float(np.std(rewards)),
         mean_yes_logit=float(np.mean(yes_logits)),
         mean_no_logit=float(np.mean(no_logits)),
+        gt_reward_mean=gt_reward_mean,
+        reward_sanity_gap=reward_sanity_gap,
         visualizations=visualizations,
     )
 
@@ -463,13 +513,20 @@ def log_to_wandb(
         "rl/entropy": stats["entropy"],
         "rl/elapsed_sec": elapsed,
     }
+    if rollout.gt_reward_mean is not None:
+        metrics["rl/reward_gt_mean"] = rollout.gt_reward_mean
+    if rollout.reward_sanity_gap is not None:
+        metrics["rl/reward_gt_minus_sampled"] = rollout.reward_sanity_gap
     if rollout.visualizations:
         wandb_images = []
         for item in rollout.visualizations:
-            caption = (
-                f"task={item.task_name} idx={item.example_index} "
-                f"reward={item.reward:.3f} yes={item.yes_logit:.3f} no={item.no_logit:.3f}"
-            )
+            caption = f"task={item.task_name} idx={item.example_index} reward={item.reward:.3f} yes={item.yes_logit:.3f} no={item.no_logit:.3f}"
+            if item.gt_reward is not None:
+                caption += (
+                    f" | gt_reward={item.gt_reward:.3f}"
+                    f" gt_yes={item.gt_yes_logit:.3f}"
+                    f" gt_no={item.gt_no_logit:.3f}"
+                )
             wandb_images.append(wandb.Image(item.image, caption=caption))
         metrics["rl/samples"] = wandb_images
     wandb_run.log(metrics, step=step)
@@ -563,6 +620,17 @@ def train(args: argparse.Namespace) -> None:
         for batch in eval_loader:
             next_step = global_step + 1
             should_visualize = args.rl_vis_every > 0 and next_step % args.rl_vis_every == 0 and args.rl_vis_samples > 0
+            should_sanity = (
+                args.rl_reward_sanity_every > 0
+                and next_step % args.rl_reward_sanity_every == 0
+                and args.rl_reward_sanity_samples > 0
+            )
+            collect_visualizations = should_visualize or should_sanity
+            max_visualizations = max(
+                args.rl_vis_samples if should_visualize else 0,
+                args.rl_reward_sanity_samples if should_sanity else 0,
+            )
+            reward_sanity_samples = args.rl_reward_sanity_samples if should_sanity else 0
             policy_model.eval()
             rollout = collect_rollout(
                 model=policy_model,
@@ -574,9 +642,10 @@ def train(args: argparse.Namespace) -> None:
                 action_mask_mode=args.rl_action_mask,
                 temperature=args.rl_temperature,
                 device=device,
-                collect_visualizations=should_visualize,
-                max_visualizations=args.rl_vis_samples,
+                collect_visualizations=collect_visualizations,
+                max_visualizations=max_visualizations,
                 visualization_context=args.rl_vis_max_context,
+                reward_sanity_samples=reward_sanity_samples,
             )
             policy_model.train()
             stats = run_grpo_update(
@@ -613,6 +682,7 @@ def train(args: argparse.Namespace) -> None:
                             f"policy_loss={stats['policy_loss']:.4f}",
                             f"kl={stats['kl']:.4f}",
                             f"entropy={stats['entropy']:.4f}",
+                            f"gt_gap={rollout.reward_sanity_gap:.4f}" if rollout.reward_sanity_gap is not None else "gt_gap=na",
                             f"elapsed={elapsed:.1f}s",
                         ]
                     )

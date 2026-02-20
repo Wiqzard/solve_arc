@@ -157,6 +157,7 @@ The stage works as:
 3. Score each candidate with a VLM reward model (`--reward-model-id`, default `Qwen/Qwen3-VL-2B-Instruct`) using `logit("yes") - logit("no")`.
 4. Optimize VARC with GRPO (`--rl-group-size`, `--rl-clip-eps`, `--rl-beta`).
 5. Log training metrics and sample visualizations with Weights & Biases (`--use-wandb`) and optional local PNG dumps (`--rl-vis-dir`).
+6. Optional reward sanity checks compare sampled-candidate reward vs ground-truth-candidate reward (`--rl-reward-sanity-every`, `--rl-reward-sanity-samples`).
 
 Example command (single ARC task):
 ```
@@ -173,8 +174,11 @@ python rl_train_ARC.py \
   --architecture vit \
   --reward-model-id Qwen/Qwen3-VL-2B-Instruct \
   --rl-group-size 4 \
+  --rl-action-mask target \
   --rl-vis-every 10 \
   --rl-vis-samples 4 \
+  --rl-reward-sanity-every 10 \
+  --rl-reward-sanity-samples 2 \
   --rl-vis-dir outputs/rl_vis/<task_id> \
   --use-wandb \
   --wandb-project VisionARC \
