@@ -215,6 +215,10 @@ Run:
 ```
 bash script/flow_train_context_vit.sh
 ```
+DDP script:
+```
+bash script/flow_train_context_vit_ddp.sh
+```
 
 DDP run (`torchrun`, 4 GPUs example):
 ```
@@ -275,6 +279,10 @@ Evaluation:
 Run:
 ```
 bash script/flow_train_context_vit_discrete.sh
+```
+DDP script:
+```
+bash script/flow_train_context_vit_discrete_ddp.sh
 ```
 
 DDP run (`torchrun`, 4 GPUs example):

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+
+torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_ARC.py \
+  --ddp \
+  --data-root "raw_data/ARC-AGI" \
+  --train-split "training" \
+  --eval-split "evaluation" \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --embed-dim 512 \
+  --depth 10 \
+  --num-heads 8 \
+  --mlp-ratio 4.0 \
+  --dropout 0.1 \
+  --no-framewise-causal-attention \
+  --attention-backend "auto" \
+  --batch-size 16 \
+  --eval-batch-size 8 \
+  --log-every-steps 25 \
+  --epochs 20 \
+  --learning-rate 2e-4 \
+  --weight-decay 0 \
+  --discrete-rate 5.0 \
+  --reverse-sampler "sample" \
+  --sample-steps 40 \
+  --save-path "saves/flow_context_vit_discrete/checkpoint_last.pt" \
+  --best-save-path "saves/flow_context_vit_discrete/checkpoint_best.pt" \
+  --use-wandb \
+  --wandb-project "VisionARC" \
+  --wandb-num-vis-samples 8 \
+  --wandb-vis-scale 8 \
+  --wandb-run-name "flow-context-vit-discrete-ddp"
