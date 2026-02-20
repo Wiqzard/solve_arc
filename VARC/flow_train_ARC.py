@@ -116,6 +116,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--include-rearc",
+        action="store_true",
+        help="Add tasks from the RE-ARC dataset to the flow training set.",
+    )
+    parser.add_argument(
+        "--rearc-path",
+        type=str,
+        default="raw_data/re_arc",
+        help="Path to RE-ARC dataset root.",
+    )
+    parser.add_argument(
+        "--rearc-limit",
+        type=int,
+        default=-1,
+        help="Maximum RE-ARC examples per task (-1 means all).",
+    )
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")

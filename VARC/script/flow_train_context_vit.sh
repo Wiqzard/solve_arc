@@ -18,6 +18,7 @@ python flow_train_ARC.py \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
+  --include-rearc \
   --bf16-autocast \
   --sample-steps 40 \
   --save-path "saves/flow_context_vit/checkpoint_last.pt" \

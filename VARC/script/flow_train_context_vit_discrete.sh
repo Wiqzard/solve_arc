@@ -18,6 +18,7 @@ python flow_train_discrete_ARC.py \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
+  --include-rearc \
   --bf16-autocast \
   --discrete-rate 5.0 \
   --reverse-sampler "sample" \

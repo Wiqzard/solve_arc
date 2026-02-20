@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -33,6 +33,8 @@ class ARCContextFlowDataset(Dataset):
         seed: int = 42,
         translation_augmentation: bool = True,
         resolution_augmentation: bool = True,
+        extra_train_roots: Optional[Iterable[Path]] = None,
+        extra_train_limit: Optional[int] = None,
     ) -> None:
         if mode not in {"train", "eval"}:
             raise ValueError("mode must be 'train' or 'eval'.")
@@ -84,6 +86,10 @@ class ARCContextFlowDataset(Dataset):
                         "query_index": query_index,
                     }
                 )
+
+        if mode == "train" and extra_train_roots:
+            for extra_root in extra_train_roots:
+                self._load_extra_training_data_rearc(Path(extra_root), extra_train_limit)
 
         if not self._query_records:
             raise RuntimeError(f"No valid episodes found for split={split} mode={mode}.")
@@ -178,6 +184,57 @@ class ARCContextFlowDataset(Dataset):
         if len(candidates) >= self.num_demos:
             return rng.sample(candidates, k=self.num_demos)
         return [rng.choice(candidates) for _ in range(self.num_demos)]
+
+    def _load_extra_training_data_rearc(self, extra_root: Path, limit_per_task: Optional[int]) -> None:
+        tasks_dir = extra_root / "tasks"
+        if not tasks_dir.exists():
+            tasks_dir = extra_root / "training"
+        files = sorted(tasks_dir.glob("*.json"))
+        if not files:
+            print(f"No RE-ARC task files found under {tasks_dir}, skipping.")
+            return
+
+        rng = random.Random(42)
+        added_queries = 0
+        for file_path in files:
+            task_name = file_path.stem
+            with file_path.open("r") as fh:
+                examples = json.load(fh)
+            if not isinstance(examples, list):
+                continue
+
+            valid_examples = [ex for ex in examples if self._is_valid_example(ex)]
+            if not valid_examples:
+                continue
+
+            if limit_per_task is not None:
+                rng.shuffle(valid_examples)
+                valid_examples = valid_examples[:limit_per_task]
+
+            if task_name not in self._tasks:
+                self._tasks[task_name] = {"train": [], "test": []}
+                self._train_valid_indices[task_name] = []
+            elif "train" not in self._tasks[task_name]:
+                self._tasks[task_name]["train"] = []
+
+            train_examples = self._tasks[task_name]["train"]
+            start_index = len(train_examples)
+            train_examples.extend(valid_examples)
+
+            new_indices = list(range(start_index, start_index + len(valid_examples)))
+            self._train_valid_indices[task_name].extend(new_indices)
+
+            for query_index in new_indices:
+                self._query_records.append(
+                    {
+                        "task_name": task_name,
+                        "query_source": "train",
+                        "query_index": query_index,
+                    }
+                )
+                added_queries += 1
+
+        print(f"Added {added_queries} RE-ARC train queries from {tasks_dir}.")
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         record = self._query_records[idx]
@@ -275,6 +332,13 @@ def build_flow_context_dataloaders(
     root = Path(args.data_root)
     train_translation_aug = bool(getattr(args, "flow_train_translation_aug", True))
     train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", True))
+    extra_roots: Optional[List[Path]] = None
+    extra_limit: Optional[int] = None
+    if bool(getattr(args, "include_rearc", False)):
+        extra_roots = [Path(getattr(args, "rearc_path", "raw_data/re_arc"))]
+        rearc_limit = int(getattr(args, "rearc_limit", -1))
+        if rearc_limit >= 0:
+            extra_limit = rearc_limit
     train_dataset = ARCContextFlowDataset(
         root=root,
         split=args.train_split,
@@ -285,6 +349,8 @@ def build_flow_context_dataloaders(
         seed=args.seed,
         translation_augmentation=train_translation_aug,
         resolution_augmentation=train_resolution_aug,
+        extra_train_roots=extra_roots,
+        extra_train_limit=extra_limit,
     )
     train_sampler: Optional[DistributedSampler] = None
     if distributed:
