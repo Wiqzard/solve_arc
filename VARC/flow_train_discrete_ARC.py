@@ -173,6 +173,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--eval-every", type=int, default=1)
+    parser.add_argument(
+        "--eval-every-steps",
+        type=int,
+        default=0,
+        help="If > 0, run evaluation every N optimizer steps (disables epoch-based eval).",
+    )
     parser.add_argument("--sample-steps", type=int, default=40, help="Discrete Euler steps for last-frame generation.")
 
     parser.add_argument("--save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_last.pt")
@@ -670,6 +676,10 @@ def train(args: argparse.Namespace) -> None:
 
     best_task_acc = float("-inf")
     global_step = 0
+    eval_round = 0
+    eval_on_steps = args.eval_every_steps > 0
+    if is_main and eval_on_steps:
+        print(f"Step-based eval enabled: evaluating every {args.eval_every_steps} steps.")
     for epoch in range(1, args.epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -759,6 +769,76 @@ def train(args: argparse.Namespace) -> None:
                 step_loss_accum = 0.0
                 step_loss_count = 0
 
+            if eval_on_steps and global_step % args.eval_every_steps == 0:
+                eval_round += 1
+                if eval_sampler is not None:
+                    eval_sampler.set_epoch(eval_round)
+                eval_metrics, eval_examples = evaluate_last_frame_accuracy(
+                    model,
+                    eval_loader if eval_loader is not None else train_loader,
+                    device=device,
+                    num_colors=args.num_colors,
+                    sample_steps=args.sample_steps,
+                    beta=args.discrete_rate,
+                    reverse_sampler=args.reverse_sampler,
+                    collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
+                    show_progress=is_main,
+                    autocast_enabled=bf16_autocast,
+                )
+                if is_main:
+                    print(
+                        " | ".join(
+                            [
+                                "eval(trigger=steps)",
+                                f"epoch={epoch}",
+                                f"step={global_step}",
+                                f"sample_acc={eval_metrics['sample_acc']:.4f}",
+                                f"task_acc={eval_metrics['task_acc']:.4f}",
+                            ]
+                        )
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {
+                                "eval/sample_acc": eval_metrics["sample_acc"],
+                                "eval/task_acc": eval_metrics["task_acc"],
+                                "eval/trigger_step": global_step,
+                                "eval/trigger_epoch": epoch,
+                            },
+                            step=global_step,
+                        )
+                    if eval_metrics["task_acc"] > best_task_acc:
+                        best_task_acc = eval_metrics["task_acc"]
+                        save_checkpoint(
+                            save_path=Path(args.best_save_path),
+                            model=model,
+                            optimizer=optimizer,
+                            epoch=epoch,
+                            args=args,
+                            metrics=eval_metrics,
+                        )
+                    if wandb_run is not None and eval_examples:
+                        viz_images = []
+                        for sample in eval_examples:
+                            image = build_eval_visualization(
+                                frames=sample["frames"],
+                                frame_valid_mask=sample["frame_valid_mask"],
+                                prediction=sample["prediction"],
+                                target_output=sample["target_output"],
+                                target_valid_mask=sample["target_valid_mask"],
+                                num_demos=args.num_demos,
+                                scale=max(int(args.wandb_vis_scale), 1),
+                                num_colors=args.num_colors,
+                            )
+                            caption = (
+                                f"task={sample['task_name']} | query={sample['query_index']} | "
+                                f"correct={int(sample['is_correct'])} | order={panel_order_string(args.num_demos)}"
+                            )
+                            viz_images.append(wandb.Image(image, caption=caption))
+                        wandb_run.log({"eval/generations": viz_images}, step=global_step)
+                        wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
+                model.train()
+
         if distributed:
             totals = torch.tensor([running_loss, float(seen)], device=device)
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
@@ -774,10 +854,11 @@ def train(args: argparse.Namespace) -> None:
             "lr": optimizer.param_groups[0]["lr"],
         }
 
-        should_eval = args.eval_every > 0 and (epoch % args.eval_every == 0)
+        should_eval = (not eval_on_steps) and args.eval_every > 0 and (epoch % args.eval_every == 0)
         if should_eval:
+            eval_round += 1
             if eval_sampler is not None:
-                eval_sampler.set_epoch(epoch)
+                eval_sampler.set_epoch(eval_round)
             eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                 model,
                 eval_loader if eval_loader is not None else train_loader,

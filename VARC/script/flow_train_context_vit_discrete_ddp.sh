@@ -2,14 +2,16 @@
 set -euo pipefail
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-500}"
 
 torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_ARC.py \
   --ddp \
   --data-root "raw_data/ARC-AGI" \
   --train-split "training" \
   --eval-split "evaluation" \
+  --include-rearc \
   --num-demos 3 \
-  --image-size 30 \
+  --image-size 32 \
   --num-colors 12 \
   --embed-dim 512 \
   --depth 10 \
@@ -21,10 +23,11 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_A
   --batch-size 4 \
   --eval-batch-size 8 \
   --log-every-steps 5 \
-  --epochs 20 \
-  --learning-rate 2e-4 \
+  --eval-every-steps "${EVAL_EVERY_STEPS}" \
+  --epochs 100 \
+  --learning-rate 3e-4 \
+  --lr-scheduler "cosine" \
   --weight-decay 0 \
-  --include-rearc \
   --bf16-autocast \
   --discrete-rate 5.0 \
   --reverse-sampler "sample" \

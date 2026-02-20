@@ -2,6 +2,7 @@
 set -euo pipefail
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-0}"
 
 torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_ARC.py \
   --ddp \
@@ -21,6 +22,7 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_ARC.py \
   --batch-size 4 \
   --eval-batch-size 8 \
   --log-every-steps 5 \
+  --eval-every-steps "${EVAL_EVERY_STEPS}" \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \
