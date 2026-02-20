@@ -187,6 +187,49 @@ python rl_train_ARC.py \
   --rl-save-path saves/rl_stage/<task_id>_rl.pt
 ```
 
+### 6. Flow matching from scratch with frame-context ViT
+This repo includes `flow_train_ARC.py` for a from-scratch training setup where each sample is:
+1. `m` demonstration pairs: `{(x_1,y_1), ..., (x_m,y_m)}`
+2. one query pair `(x_q, y_q)`, where `y_q` is the frame to denoise
+
+Tokenized frame sequence:
+- Demo-only context length: `2 * m * s`, where `s = H * W`
+- Full sequence used by the model: `(2 * m + 2) * s` (demos + query input + query output frame)
+
+Training objective:
+- Flow matching with per-frame independent noise levels `t_f`
+- Path: `x_t = (1 - t_f) * x_0 + t_f * eps`
+- Target velocity: `v* = eps - x_0`
+- Default loss applies to the final solution frame only (`--loss-on-target-only`)
+
+Evaluation:
+- Keep demo frames and query input clean
+- Initialize only the last solution frame from noise
+- Denoise only that last frame via Euler integration
+- Report exact-match sample/task accuracy
+
+Run:
+```
+bash script/flow_train_context_vit.sh
+```
+
+Direct command:
+```
+python flow_train_ARC.py \
+  --data-root raw_data/ARC-AGI \
+  --train-split training \
+  --eval-split evaluation \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --epochs 20 \
+  --learning-rate 2e-4 \
+  --loss-on-target-only \
+  --sample-steps 40 \
+  --save-path saves/flow_context_vit/checkpoint_last.pt \
+  --best-save-path saves/flow_context_vit/checkpoint_best.pt
+```
+
 ### Important hyperparameters
 
 #### Training hyperparmeters

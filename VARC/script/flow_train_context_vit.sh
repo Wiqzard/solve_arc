@@ -1,0 +1,24 @@
+python flow_train_ARC.py \
+  --data-root "raw_data/ARC-AGI" \
+  --train-split "training" \
+  --eval-split "evaluation" \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --embed-dim 512 \
+  --depth 10 \
+  --num-heads 8 \
+  --mlp-ratio 4.0 \
+  --dropout 0.1 \
+  --batch-size 16 \
+  --eval-batch-size 8 \
+  --epochs 20 \
+  --learning-rate 2e-4 \
+  --weight-decay 0 \
+  --loss-on-target-only \
+  --sample-steps 40 \
+  --save-path "saves/flow_context_vit/checkpoint_last.pt" \
+  --best-save-path "saves/flow_context_vit/checkpoint_best.pt" \
+  --use-wandb \
+  --wandb-project "VisionARC" \
+  --wandb-run-name "flow-context-vit"
