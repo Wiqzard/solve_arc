@@ -546,8 +546,6 @@ def train(args: argparse.Namespace) -> None:
         rank=rank,
         world_size=world_size,
     )
-    if eval_loader is None:
-        raise RuntimeError("Evaluation split is required for RL stage. Provide --eval-split.")
     if not Path(args.resume_checkpoint).exists():
         raise FileNotFoundError(f"Checkpoint not found: {args.resume_checkpoint}")
     if args.reference_checkpoint and not Path(args.reference_checkpoint).exists():
@@ -602,8 +600,7 @@ def train(args: argparse.Namespace) -> None:
             wandb_kwargs["name"] = args.wandb_run_name
         wandb_run = wandb.init(**wandb_kwargs)
 
-    context_split = args.eval_split if args.eval_split else args.train_split
-    context_cache = TaskContextCache(Path(args.data_root), split=context_split)
+    context_cache = TaskContextCache(Path(args.data_root), split=args.train_split)
     reward_model = QwenYesNoRewardModel(
         model_id=args.reward_model_id,
         device=device,
@@ -617,7 +614,7 @@ def train(args: argparse.Namespace) -> None:
     train_start = time.time()
     vis_dir = Path(args.rl_vis_dir) if args.rl_vis_dir else None
     for epoch in range(args.rl_epochs):
-        for batch in eval_loader:
+        for batch in train_loader:
             next_step = global_step + 1
             should_visualize = args.rl_vis_every > 0 and next_step % args.rl_vis_every == 0 and args.rl_vis_samples > 0
             should_sanity = (
