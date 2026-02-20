@@ -12,6 +12,7 @@ python flow_train_discrete_ARC.py \
   --dropout 0.1 \
   --batch-size 16 \
   --eval-batch-size 8 \
+  --log-every-steps 25 \
   --epochs 20 \
   --learning-rate 2e-4 \
   --weight-decay 0 \

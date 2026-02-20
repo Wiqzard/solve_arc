@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=8)
+    parser.add_argument("--log-every-steps", type=int, default=50)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -279,13 +280,17 @@ def train(args: argparse.Namespace) -> None:
         )
 
     best_task_acc = float("-inf")
+    global_step = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         epoch_start = time.time()
         running_loss = 0.0
         seen = 0
+        step_loss_accum = 0.0
+        step_loss_count = 0
 
-        for batch in train_loader:
+        total_batches = len(train_loader)
+        for batch_idx, batch in enumerate(train_loader, 1):
             frames = batch["frames"].to(device)
             frame_valid_mask = batch["frame_valid_mask"].to(device)
             target_frame_index = batch["target_frame_index"].to(device)
@@ -318,8 +323,40 @@ def train(args: argparse.Namespace) -> None:
             optimizer.step()
 
             batch_size = frames.size(0)
-            running_loss += float(loss.item()) * batch_size
+            loss_value = float(loss.item())
+            running_loss += loss_value * batch_size
             seen += batch_size
+            global_step += 1
+            step_loss_accum += loss_value
+            step_loss_count += 1
+
+            if args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
+                step_avg_loss = step_loss_accum / max(step_loss_count, 1)
+                elapsed = time.time() - epoch_start
+                print(
+                    " | ".join(
+                        [
+                            f"epoch={epoch}",
+                            f"step={global_step}",
+                            f"batch={batch_idx}/{total_batches}",
+                            f"step_loss={loss_value:.6f}",
+                            f"step_avg_loss={step_avg_loss:.6f}",
+                            f"elapsed={elapsed:.1f}s",
+                        ]
+                    )
+                )
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "train/step_loss": loss_value,
+                            "train/step_avg_loss": step_avg_loss,
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                            "train/epoch": epoch,
+                        },
+                        step=global_step,
+                    )
+                step_loss_accum = 0.0
+                step_loss_count = 0
 
         train_loss = running_loss / max(seen, 1)
         epoch_time = time.time() - epoch_start
@@ -369,7 +406,7 @@ def train(args: argparse.Namespace) -> None:
         )
 
         if wandb_run is not None:
-            wandb_run.log(log_data, step=epoch)
+            wandb_run.log(log_data, step=global_step)
 
         save_checkpoint(
             save_path=Path(args.save_path),
