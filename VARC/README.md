@@ -233,6 +233,7 @@ torchrun --nproc_per_node=4 flow_train_ARC.py \
   --epochs 20 \
   --learning-rate 2e-4
 ```
+In DDP mode, evaluation is sharded across GPUs and metrics are aggregated globally; only rank 0 logs/checkpoints.
 
 Direct command:
 ```
@@ -299,6 +300,7 @@ torchrun --nproc_per_node=4 flow_train_discrete_ARC.py \
   --learning-rate 2e-4 \
   --discrete-rate 5.0
 ```
+In DDP mode, evaluation is sharded across GPUs and metrics are aggregated globally; only rank 0 logs/checkpoints.
 
 Direct command:
 ```

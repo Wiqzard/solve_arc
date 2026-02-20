@@ -212,6 +212,7 @@ def build_flow_context_dataloaders(
     Optional[ARCContextFlowDataset],
     Optional[DataLoader],
     Optional[DistributedSampler],
+    Optional[DistributedSampler],
 ]:
     root = Path(args.data_root)
     train_dataset = ARCContextFlowDataset(
@@ -243,6 +244,7 @@ def build_flow_context_dataloaders(
 
     eval_dataset: Optional[ARCContextFlowDataset] = None
     eval_loader: Optional[DataLoader] = None
+    eval_sampler: Optional[DistributedSampler] = None
     if args.eval_split:
         eval_dataset = ARCContextFlowDataset(
             root=root,
@@ -253,12 +255,20 @@ def build_flow_context_dataloaders(
             num_colors=args.num_colors,
             seed=args.seed,
         )
+        if distributed:
+            eval_sampler = DistributedSampler(
+                eval_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+            )
         eval_loader = DataLoader(
             eval_dataset,
             batch_size=args.eval_batch_size,
             shuffle=False,
+            sampler=eval_sampler,
             num_workers=args.num_workers,
             collate_fn=collate_flow_context,
             drop_last=False,
         )
-    return train_dataset, train_loader, eval_dataset, eval_loader, train_sampler
+    return train_dataset, train_loader, eval_dataset, eval_loader, train_sampler, eval_sampler

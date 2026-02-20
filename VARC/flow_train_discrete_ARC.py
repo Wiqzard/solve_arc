@@ -461,17 +461,15 @@ def evaluate_last_frame_accuracy(
     beta: float,
     reverse_sampler: str,
     collect_examples: int = 0,
+    show_progress: bool = True,
 ) -> tuple[Dict[str, float], List[Dict[str, Any]]]:
     if loader is None:
         return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}, []
 
-    task_total: Dict[str, int] = {}
-    task_correct: Dict[str, int] = {}
-    sample_total = 0
-    sample_correct = 0
+    episode_results: Dict[str, tuple[str, bool]] = {}
     examples: List[Dict[str, Any]] = []
 
-    eval_iterator = tqdm(loader, desc="eval", total=len(loader), leave=False)
+    eval_iterator = tqdm(loader, desc="eval", total=len(loader), leave=False, disable=not show_progress)
     for batch in eval_iterator:
         frames = batch["frames"].to(device)
         frame_valid_mask = batch["frame_valid_mask"].to(device)
@@ -498,10 +496,9 @@ def evaluate_last_frame_accuracy(
         for i in range(prediction.size(0)):
             task_name = task_names[i]
             is_correct = bool(exact[i].item())
-            task_total[task_name] = task_total.get(task_name, 0) + 1
-            task_correct[task_name] = task_correct.get(task_name, 0) + int(is_correct)
-            sample_total += 1
-            sample_correct += int(is_correct)
+            query_index = int(query_indices[i].item())
+            episode_key = f"{task_name}::{query_index}"
+            episode_results[episode_key] = (task_name, is_correct)
             if len(examples) < collect_examples:
                 examples.append(
                     {
@@ -516,8 +513,25 @@ def evaluate_last_frame_accuracy(
                     }
                 )
 
+    if dist.is_available() and dist.is_initialized():
+        gathered: list[Optional[Dict[str, tuple[str, bool]]]] = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, episode_results)
+        merged_results: Dict[str, tuple[str, bool]] = {}
+        for shard in gathered:
+            if shard is not None:
+                merged_results.update(shard)
+    else:
+        merged_results = episode_results
+
+    sample_total = len(merged_results)
+    sample_correct = sum(1 for _, is_correct in merged_results.values() if is_correct)
     sample_acc = sample_correct / max(sample_total, 1)
     task_acc = 0.0
+    task_total: Dict[str, int] = {}
+    task_correct: Dict[str, int] = {}
+    for task_name, is_correct in merged_results.values():
+        task_total[task_name] = task_total.get(task_name, 0) + 1
+        task_correct[task_name] = task_correct.get(task_name, 0) + int(is_correct)
     if task_total:
         task_acc = float(np.mean([task_correct[name] / task_total[name] for name in task_total]))
     return {"sample_acc": sample_acc, "task_acc": task_acc, "samples": float(sample_total)}, examples
@@ -549,7 +563,7 @@ def train(args: argparse.Namespace) -> None:
     is_main = rank == 0
     set_seed(args.seed + rank)
 
-    train_dataset, train_loader, eval_dataset, eval_loader, train_sampler = build_flow_context_dataloaders(
+    train_dataset, train_loader, eval_dataset, eval_loader, train_sampler, eval_sampler = build_flow_context_dataloaders(
         args,
         distributed=distributed,
         rank=rank,
@@ -704,9 +718,9 @@ def train(args: argparse.Namespace) -> None:
         }
 
         should_eval = args.eval_every > 0 and (epoch % args.eval_every == 0)
-        if should_eval and distributed:
-            dist.barrier()
-        if should_eval and is_main:
+        if should_eval:
+            if eval_sampler is not None:
+                eval_sampler.set_epoch(epoch)
             eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                 model,
                 eval_loader if eval_loader is not None else train_loader,
@@ -715,46 +729,46 @@ def train(args: argparse.Namespace) -> None:
                 sample_steps=args.sample_steps,
                 beta=args.discrete_rate,
                 reverse_sampler=args.reverse_sampler,
-                collect_examples=args.wandb_num_vis_samples if wandb_run is not None else 0,
+                collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
+                show_progress=is_main,
             )
-            log_data.update(
-                {
-                    "eval_sample_acc": eval_metrics["sample_acc"],
-                    "eval_task_acc": eval_metrics["task_acc"],
-                }
-            )
-            if eval_metrics["task_acc"] > best_task_acc:
-                best_task_acc = eval_metrics["task_acc"]
-                save_checkpoint(
-                    save_path=Path(args.best_save_path),
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch,
-                    args=args,
-                    metrics=eval_metrics,
+            if is_main:
+                log_data.update(
+                    {
+                        "eval_sample_acc": eval_metrics["sample_acc"],
+                        "eval_task_acc": eval_metrics["task_acc"],
+                    }
                 )
-            if wandb_run is not None and eval_examples:
-                viz_images = []
-                for sample in eval_examples:
-                    image = build_eval_visualization(
-                        frames=sample["frames"],
-                        frame_valid_mask=sample["frame_valid_mask"],
-                        prediction=sample["prediction"],
-                        target_output=sample["target_output"],
-                        target_valid_mask=sample["target_valid_mask"],
-                        num_demos=args.num_demos,
-                        scale=max(int(args.wandb_vis_scale), 1),
-                        num_colors=args.num_colors,
+                if eval_metrics["task_acc"] > best_task_acc:
+                    best_task_acc = eval_metrics["task_acc"]
+                    save_checkpoint(
+                        save_path=Path(args.best_save_path),
+                        model=model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        args=args,
+                        metrics=eval_metrics,
                     )
-                    caption = (
-                        f"task={sample['task_name']} | query={sample['query_index']} | "
-                        f"correct={int(sample['is_correct'])} | order={panel_order_string(args.num_demos)}"
-                    )
-                    viz_images.append(wandb.Image(image, caption=caption))
-                wandb_run.log({"eval/generations": viz_images}, step=global_step)
-                wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
-        if should_eval and distributed:
-            dist.barrier()
+                if wandb_run is not None and eval_examples:
+                    viz_images = []
+                    for sample in eval_examples:
+                        image = build_eval_visualization(
+                            frames=sample["frames"],
+                            frame_valid_mask=sample["frame_valid_mask"],
+                            prediction=sample["prediction"],
+                            target_output=sample["target_output"],
+                            target_valid_mask=sample["target_valid_mask"],
+                            num_demos=args.num_demos,
+                            scale=max(int(args.wandb_vis_scale), 1),
+                            num_colors=args.num_colors,
+                        )
+                        caption = (
+                            f"task={sample['task_name']} | query={sample['query_index']} | "
+                            f"correct={int(sample['is_correct'])} | order={panel_order_string(args.num_demos)}"
+                        )
+                        viz_images.append(wandb.Image(image, caption=caption))
+                    wandb_run.log({"eval/generations": viz_images}, step=global_step)
+                    wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
 
         if is_main:
             print(
