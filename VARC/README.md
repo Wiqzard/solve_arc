@@ -230,6 +230,45 @@ python flow_train_ARC.py \
   --best-save-path saves/flow_context_vit/checkpoint_best.pt
 ```
 
+### 7. Discrete flow matching from scratch (logit-based)
+This repo also includes `flow_train_discrete_ARC.py`, which keeps the same context construction but uses a discrete corruption path and token-logit training objective.
+
+Discrete training path:
+- Sample per-frame noise levels `t_f` independently.
+- Corrupt tokens with replacement:
+  - with probability `t_f`: replace token with random color
+  - otherwise: keep clean token
+- Model predicts logits over colors for every token.
+- Loss is cross-entropy to clean tokens on corrupted positions (default: only final solution frame), with optional `1/t` weighting.
+
+Evaluation:
+- Keep demos + query input clean.
+- Initialize only the last solution frame as random tokens.
+- Run discrete reverse updates for that frame only, measure exact-match sample/task accuracy.
+
+Run:
+```
+bash script/flow_train_context_vit_discrete.sh
+```
+
+Direct command:
+```
+python flow_train_discrete_ARC.py \
+  --data-root raw_data/ARC-AGI \
+  --train-split training \
+  --eval-split evaluation \
+  --num-demos 3 \
+  --image-size 30 \
+  --num-colors 12 \
+  --epochs 20 \
+  --learning-rate 2e-4 \
+  --loss-on-target-only \
+  --weight-by-inverse-noise \
+  --sample-steps 40 \
+  --save-path saves/flow_context_vit_discrete/checkpoint_last.pt \
+  --best-save-path saves/flow_context_vit_discrete/checkpoint_best.pt
+```
+
 ### Important hyperparameters
 
 #### Training hyperparmeters
