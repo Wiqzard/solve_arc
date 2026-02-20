@@ -110,6 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every-steps", type=int, default=50)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--lr-scheduler", type=str, default="cosine", choices=("cosine", "none"))
+    parser.add_argument("--min-learning-rate", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -387,6 +389,14 @@ def train(args: argparse.Namespace) -> None:
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+    if args.lr_scheduler == "cosine":
+        total_train_steps = max(args.epochs * len(train_loader), 1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_train_steps,
+            eta_min=args.min_learning_rate,
+        )
 
     wandb_run = None
     if args.use_wandb and is_main:
@@ -443,6 +453,8 @@ def train(args: argparse.Namespace) -> None:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             batch_size = frames.size(0)
             loss_value = float(loss.item())
