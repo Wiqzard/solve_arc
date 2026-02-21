@@ -351,8 +351,8 @@ def panel_order_string(num_demos: int) -> str:
 def train_panel_order_string(num_demos: int) -> str:
     parts: List[str] = []
     for demo_id in range(1, num_demos + 1):
-        parts.extend([f"D{demo_id}-in", f"D{demo_id}-out"])
-    parts.extend(["Q-in", "Q-noisy", "Q-pred", "Q-gt"])
+        parts.extend([f"D{demo_id}-in(x_t)", f"D{demo_id}-out(x_t)"])
+    parts.extend(["Q-in(x_t)", "Q-target(x_t)", "Q-pred", "Q-gt"])
     return ",".join(parts)
 
 
@@ -469,9 +469,10 @@ def build_eval_visualization(
 
 def build_train_step_visualization(
     *,
-    frames: torch.Tensor,
+    clean_frames: torch.Tensor,
+    noisy_frames: torch.Tensor,
     frame_valid_mask: torch.Tensor,
-    noisy_target: torch.Tensor,
+    target_frame_index: int,
     prediction: torch.Tensor,
     target_output: torch.Tensor,
     target_valid_mask: torch.Tensor,
@@ -485,7 +486,7 @@ def build_train_step_visualization(
         output_idx = input_idx + 1
         panels.append(
             render_grid_rgb(
-                frames[input_idx],
+                noisy_frames[input_idx],
                 frame_valid_mask[input_idx],
                 scale=scale,
                 num_colors=num_colors,
@@ -493,7 +494,7 @@ def build_train_step_visualization(
         )
         panels.append(
             render_grid_rgb(
-                frames[output_idx],
+                noisy_frames[output_idx],
                 frame_valid_mask[output_idx],
                 scale=scale,
                 num_colors=num_colors,
@@ -503,7 +504,7 @@ def build_train_step_visualization(
     query_input_idx = 2 * num_demos
     panels.append(
         render_grid_rgb(
-            frames[query_input_idx],
+            noisy_frames[query_input_idx],
             frame_valid_mask[query_input_idx],
             scale=scale,
             num_colors=num_colors,
@@ -511,7 +512,7 @@ def build_train_step_visualization(
     )
     panels.append(
         render_grid_rgb(
-            noisy_target,
+            noisy_frames[target_frame_index],
             target_valid_mask,
             scale=scale,
             num_colors=num_colors,
@@ -527,7 +528,7 @@ def build_train_step_visualization(
     )
     panels.append(
         render_grid_rgb(
-            target_output,
+            target_output if target_output is not None else clean_frames[target_frame_index],
             target_valid_mask,
             scale=scale,
             num_colors=num_colors,
@@ -1025,6 +1026,16 @@ def train(args: argparse.Namespace) -> None:
             if is_main and args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
                 step_avg_loss = step_loss_accum / max(step_loss_count, 1)
                 elapsed = time.time() - epoch_start
+                valid_mask_bool = frame_valid_mask.bool()
+                changed_mask = (x_t_tokens != frames) & valid_mask_bool
+                noise_all = changed_mask.float().sum() / valid_mask_bool.float().sum().clamp_min(1.0)
+                batch_ids = torch.arange(batch_size, device=device)
+                target_valid = target_valid_mask.bool()
+                target_changed = changed_mask[batch_ids, target_frame_index]
+                noise_target = target_changed.float().sum() / target_valid.float().sum().clamp_min(1.0)
+                context_valid = valid_mask_bool.clone()
+                context_valid[batch_ids, target_frame_index] = False
+                noise_context = (changed_mask.float() * context_valid.float()).sum() / context_valid.float().sum().clamp_min(1.0)
                 log_line = " | ".join(
                     [
                         f"epoch={epoch}",
@@ -1032,6 +1043,9 @@ def train(args: argparse.Namespace) -> None:
                         f"batch={batch_idx}/{total_batches}",
                         f"step_loss={loss_value:.6f}",
                         f"step_avg_loss={step_avg_loss:.6f}",
+                        f"noise_all={float(noise_all):.3f}",
+                        f"noise_ctx={float(noise_context):.3f}",
+                        f"noise_tgt={float(noise_target):.3f}",
                         f"elapsed={elapsed:.1f}s",
                     ]
                 )
@@ -1047,6 +1061,9 @@ def train(args: argparse.Namespace) -> None:
                             "train/step_avg_loss": step_avg_loss,
                             "train/lr": optimizer.param_groups[0]["lr"],
                             "train/epoch": epoch,
+                            "train/noise_fraction_all": float(noise_all),
+                            "train/noise_fraction_context": float(noise_context),
+                            "train/noise_fraction_target": float(noise_target),
                         },
                         step=global_step,
                     )
@@ -1066,9 +1083,10 @@ def train(args: argparse.Namespace) -> None:
                     for sample_idx in range(num_vis):
                         target_idx = int(target_frame_index[sample_idx].item())
                         image = build_train_step_visualization(
-                            frames=frames[sample_idx].detach().cpu(),
+                            clean_frames=frames[sample_idx].detach().cpu(),
+                            noisy_frames=x_t_tokens[sample_idx].detach().cpu(),
                             frame_valid_mask=frame_valid_mask[sample_idx].detach().cpu(),
-                            noisy_target=x_t_tokens[sample_idx, target_idx].detach().cpu(),
+                            target_frame_index=target_idx,
                             prediction=pred_tokens[sample_idx, target_idx].detach().cpu(),
                             target_output=frames[sample_idx, target_idx].detach().cpu(),
                             target_valid_mask=target_valid_mask[sample_idx].detach().cpu(),
