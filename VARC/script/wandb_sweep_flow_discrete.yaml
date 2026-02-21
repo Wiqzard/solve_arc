@@ -14,6 +14,8 @@ parameters:
     values: [0.0003, 0.0001]
   num-heads:
     values: [8, 12, 16]
+  framewise-causal-attention:
+    values: [false, true]
   rope-3d:
     values: [false, true]
   rope-base:
@@ -21,9 +23,11 @@ parameters:
   discrete-rate:
     values: [3.0, 5.0, 7.0]
   depth:
-    values: [6, 10, 14, 20]
+    values: [6, 10, 20]
   embed-dim:
-    values: [384, 512, 768, 1024]
+    values: [384, 512, 768]
+  image-size:
+    values: [32, 64]
 
 command:
   - ${env}
@@ -43,8 +47,6 @@ command:
   - evaluation
   - --num-demos
   - "3"
-  - --image-size
-  - "32"
   - --num-colors
   - "12"
   - --mlp-ratio
@@ -75,7 +77,6 @@ command:
   - auto
   - --reverse-sampler
   - sample
-  - --framewise-causal-attention
   - --sample-steps
   - "40"
   - --include-rearc

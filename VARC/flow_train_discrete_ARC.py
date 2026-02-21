@@ -135,8 +135,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument(
         "--framewise-causal-attention",
-        action="store_true",
+        nargs="?",
+        const=True,
         default=False,
+        type=parse_optional_bool,
         help="Enable framewise causal attention (frame f attends only to frames <= f).",
     )
     parser.add_argument(
