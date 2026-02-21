@@ -126,6 +126,17 @@ def parse_args() -> argparse.Namespace:
         choices=("auto", "flex", "sdpa"),
         help="Attention backend for framewise-causal mode.",
     )
+    parser.add_argument(
+        "--rope-3d",
+        action="store_true",
+        help="Enable 3D RoPE (frame,y,x) on attention q/k.",
+    )
+    parser.add_argument(
+        "--rope-base",
+        type=float,
+        default=10000.0,
+        help="Base frequency for 3D RoPE.",
+    )
 
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=8)
@@ -501,6 +512,8 @@ def train(args: argparse.Namespace) -> None:
         dropout=args.dropout,
         framewise_causal_attention=args.framewise_causal_attention,
         attention_backend=args.attention_backend,
+        rope_3d=args.rope_3d,
+        rope_base=args.rope_base,
     ).to(device)
     model = maybe_compile_model(model, args, is_main=is_main)
     if distributed:
