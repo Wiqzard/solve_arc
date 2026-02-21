@@ -1,4 +1,10 @@
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-0}"
+COMPILE_MODE="${COMPILE_MODE:-reduce-overhead}"
+NO_COMPILE="${NO_COMPILE:-0}"
+COMPILE_ARGS=(--compile-mode "${COMPILE_MODE}")
+if [[ "${NO_COMPILE}" == "1" ]]; then
+  COMPILE_ARGS=(--no-compile)
+fi
 
 python flow_train_discrete_ARC.py \
   --data-root "raw_data/ARC-AGI" \
@@ -20,6 +26,7 @@ python flow_train_discrete_ARC.py \
   --eval-every-steps "${EVAL_EVERY_STEPS}" \
   --epochs 20 \
   --learning-rate 2e-4 \
+  "${COMPILE_ARGS[@]}" \
   --weight-decay 0 \
   --include-rearc \
   --bf16-autocast \

@@ -76,6 +76,30 @@ def autocast_context(device: torch.device, enabled: bool):
     return nullcontext()
 
 
+def maybe_compile_model(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+    *,
+    is_main: bool,
+) -> torch.nn.Module:
+    if args.no_compile:
+        if is_main:
+            print("torch.compile disabled via --no-compile.")
+        return model
+    if not hasattr(torch, "compile"):
+        if is_main:
+            print("Warning: torch.compile is unavailable in this PyTorch build; continuing without compile.")
+        return model
+    try:
+        if is_main:
+            print(f"Applying torch.compile(mode={args.compile_mode})...")
+        return torch.compile(model, mode=args.compile_mode)
+    except Exception as exc:
+        if is_main:
+            print(f"Warning: torch.compile failed ({exc}); continuing without compile.")
+        return model
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ARC frame-context ViT with discrete flow matching.")
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
@@ -116,6 +140,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile optimization.")
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default="reduce-overhead",
+        choices=("default", "reduce-overhead", "max-autotune"),
+        help="torch.compile mode.",
+    )
     parser.add_argument(
         "--include-rearc",
         action="store_true",
@@ -659,6 +691,7 @@ def train(args: argparse.Namespace) -> None:
         framewise_causal_attention=args.framewise_causal_attention,
         attention_backend=args.attention_backend,
     ).to(device)
+    model = maybe_compile_model(model, args, is_main=is_main)
     if distributed:
         model = DDP(
             model,
