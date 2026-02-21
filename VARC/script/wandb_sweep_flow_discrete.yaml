@@ -1,33 +1,37 @@
 program: flow_train_discrete_ARC.py
-method: bayes
+method: random #bayes
 metric:
   goal: minimize
   name: eval/loss
-early_terminate:
-  type: hyperband
-  min_iter: 3
-  eta: 3
-  strict: true
+#early_terminate:
+#  type: hyperband
+#  min_iter: 3
+#  eta: 3
+#  strict: true
 
 parameters:
-  learning-rate:
-    values: [0.0003, 0.0001]
-  num-heads:
-    values: [8, 12, 16]
-  framewise-causal-attention:
-    values: [false, true]
+  #learning-rate:
+  #  values: [0.0003, 0.0001]
   rope-3d:
     values: [false, true]
-  rope-base:
-    values: [256.0, 2048.0]
+  image-size:
+    values: [32, 48]
+   # values: [32]
+    #values: [32, 64]
   discrete-rate:
-    values: [3.0, 5.0, 7.0]
+    values: [1.0, 3.0, 5.0, 7.0]
   depth:
-    values: [6, 10, 20]
+    values: [4, 8, 16, 24, 32]
   embed-dim:
     values: [384, 512, 768]
-  image-size:
-    values: [32, 64]
+  num-heads:
+    values: [8, 12, 16, 32]
+  #batch-size:
+  #  values: [4, 8, 16, 32]
+  #rope-base:
+  #  values: [256.0, 2048.0]
+  #framewise-causal-attention:
+  #  values: [false, true]
 
 command:
   - ${env}
@@ -53,20 +57,30 @@ command:
   - "4.0"
   - --dropout
   - "0.0"
+  - --framewise-causal-attention
+  - --rope-3d
+  - --rope-base
+  - "256.0"
   - --flow-train-resolution-aug
   - --flow-train-translation-aug
   - --batch-size
   - "4"
   - --eval-batch-size
-  - "8"
+  - "4"
   - --num-workers
   - "8"
   - --log-every-steps
   - "5"
   - --eval-every-steps
-  - "200"
+  - "500"
   - --epochs
-  - "20"
+  - "1"
+  - --learning-rate
+  - "3e-4"
+  - --lr-scheduler
+  - cosine
+  - --discrete-rate
+  - "5.0"
   - --min-learning-rate
   - "1e-6"
   - --weight-decay
@@ -80,9 +94,11 @@ command:
   - --sample-steps
   - "40"
   - --include-rearc
+  - --rearc-limit
+  - "150000"
   - --include-barc
   - --barc-limit
-  - "400000"
+  - "100000"
   - --bf16-autocast
   - --compile
   - --use-wandb
