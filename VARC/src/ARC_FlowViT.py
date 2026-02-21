@@ -46,6 +46,9 @@ class FramewiseSelfAttention(nn.Module):
         num_heads: int,
         dropout: float,
         attention_backend: str,
+        causal: bool,
+        use_3d_rope: bool,
+        rope_base: float,
     ) -> None:
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -58,6 +61,15 @@ class FramewiseSelfAttention(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.dropout = dropout
         self.attention_backend = attention_backend
+        self.causal = causal
+        self.use_3d_rope = use_3d_rope
+        self.rope_base = rope_base
+        self.rope_axis_dim = (self.head_dim // 6) * 2
+        self.rope_total_dim = self.rope_axis_dim * 3
+        if self.use_3d_rope and self.rope_axis_dim == 0:
+            raise ValueError(
+                f"3D RoPE requires head_dim>=6 (got {self.head_dim} with embed_dim={embed_dim}, num_heads={num_heads})."
+            )
 
         self.qkv = nn.Linear(embed_dim, embed_dim * 3)
         self.proj = nn.Linear(embed_dim, embed_dim)
@@ -88,12 +100,16 @@ class FramewiseSelfAttention(nn.Module):
         *,
         frame_index_per_token: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        causal = frame_index_per_token[:, None] >= frame_index_per_token[None, :]
+    ) -> Optional[torch.Tensor]:
+        if self.causal:
+            causal = frame_index_per_token[:, None] >= frame_index_per_token[None, :]
+            if key_padding_mask is None:
+                return causal
+            key_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(1)
+            return causal.unsqueeze(0).unsqueeze(0) & key_valid
         if key_padding_mask is None:
-            return causal
-        key_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(1)
-        return causal.unsqueeze(0).unsqueeze(0) & key_valid
+            return None
+        return (~key_padding_mask).unsqueeze(1).unsqueeze(1)
 
     def _get_flex_block_mask(
         self,
@@ -103,7 +119,7 @@ class FramewiseSelfAttention(nn.Module):
         if create_block_mask is None:
             raise RuntimeError("torch flex_attention is unavailable.")
         seq_len = int(frame_index_per_token.numel())
-        cache_key = (seq_len, str(frame_index_per_token.device))
+        cache_key = (seq_len, str(frame_index_per_token.device), self.causal)
         cached = self._flex_block_mask_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -117,6 +133,8 @@ class FramewiseSelfAttention(nn.Module):
             kv_idx: torch.Tensor,
         ) -> torch.Tensor:
             del batch_idx, head_idx
+            if not self.causal:
+                return torch.ones_like(q_idx, dtype=torch.bool)
             return frame_ids[q_idx] >= frame_ids[kv_idx]
 
         block_mask = create_block_mask(
@@ -130,17 +148,84 @@ class FramewiseSelfAttention(nn.Module):
         self._flex_block_mask_cache[cache_key] = block_mask
         return block_mask
 
+    def _rotary_cos_sin(self, position_ids: torch.Tensor, *, half_dim: int, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        freq_idx = torch.arange(half_dim, device=position_ids.device, dtype=torch.float32)
+        inv_freq = self.rope_base ** (-freq_idx / max(float(half_dim), 1.0))
+        angles = position_ids.float().unsqueeze(-1) * inv_freq.unsqueeze(0)
+        cos = torch.cos(angles).to(dtype=dtype).unsqueeze(0).unsqueeze(0)
+        sin = torch.sin(angles).to(dtype=dtype).unsqueeze(0).unsqueeze(0)
+        return cos, sin
+
+    def _apply_rotary_axis(self, tensor: torch.Tensor, *, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        even = tensor[..., 0::2]
+        odd = tensor[..., 1::2]
+        rot_even = even * cos - odd * sin
+        rot_odd = even * sin + odd * cos
+        return torch.stack((rot_even, rot_odd), dim=-1).flatten(-2)
+
+    def _apply_3d_rope(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        frame_index_per_token: torch.Tensor,
+        y_index_per_token: torch.Tensor,
+        x_index_per_token: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        axis_dim = self.rope_axis_dim
+        half_dim = axis_dim // 2
+        if axis_dim == 0:
+            return q, k
+
+        q_frame = q[..., :axis_dim]
+        q_y = q[..., axis_dim : 2 * axis_dim]
+        q_x = q[..., 2 * axis_dim : 3 * axis_dim]
+        q_rest = q[..., 3 * axis_dim :]
+
+        k_frame = k[..., :axis_dim]
+        k_y = k[..., axis_dim : 2 * axis_dim]
+        k_x = k[..., 2 * axis_dim : 3 * axis_dim]
+        k_rest = k[..., 3 * axis_dim :]
+
+        frame_cos, frame_sin = self._rotary_cos_sin(frame_index_per_token, half_dim=half_dim, dtype=q.dtype)
+        y_cos, y_sin = self._rotary_cos_sin(y_index_per_token, half_dim=half_dim, dtype=q.dtype)
+        x_cos, x_sin = self._rotary_cos_sin(x_index_per_token, half_dim=half_dim, dtype=q.dtype)
+
+        q_frame = self._apply_rotary_axis(q_frame, cos=frame_cos, sin=frame_sin)
+        q_y = self._apply_rotary_axis(q_y, cos=y_cos, sin=y_sin)
+        q_x = self._apply_rotary_axis(q_x, cos=x_cos, sin=x_sin)
+
+        k_frame = self._apply_rotary_axis(k_frame, cos=frame_cos, sin=frame_sin)
+        k_y = self._apply_rotary_axis(k_y, cos=y_cos, sin=y_sin)
+        k_x = self._apply_rotary_axis(k_x, cos=x_cos, sin=x_sin)
+
+        q = torch.cat([q_frame, q_y, q_x, q_rest], dim=-1)
+        k = torch.cat([k_frame, k_y, k_x, k_rest], dim=-1)
+        return q, k
+
     def forward(
         self,
         x: torch.Tensor,
         *,
         frame_index_per_token: torch.Tensor,
+        y_index_per_token: Optional[torch.Tensor] = None,
+        x_index_per_token: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
         qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
+        if self.use_3d_rope:
+            if y_index_per_token is None or x_index_per_token is None:
+                raise ValueError("3D RoPE requires y_index_per_token and x_index_per_token.")
+            q, k = self._apply_3d_rope(
+                q=q,
+                k=k,
+                frame_index_per_token=frame_index_per_token,
+                y_index_per_token=y_index_per_token,
+                x_index_per_token=x_index_per_token,
+            )
 
         backend = self._resolve_backend(x)
         if backend == "flex":
@@ -193,6 +278,9 @@ class FramewiseTransformerBlock(nn.Module):
         mlp_ratio: float,
         dropout: float,
         attention_backend: str,
+        causal: bool,
+        use_3d_rope: bool,
+        rope_base: float,
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -201,6 +289,9 @@ class FramewiseTransformerBlock(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             attention_backend=attention_backend,
+            causal=causal,
+            use_3d_rope=use_3d_rope,
+            rope_base=rope_base,
         )
         self.norm2 = nn.LayerNorm(embed_dim)
         ff_dim = int(embed_dim * mlp_ratio)
@@ -217,11 +308,15 @@ class FramewiseTransformerBlock(nn.Module):
         x: torch.Tensor,
         *,
         frame_index_per_token: torch.Tensor,
+        y_index_per_token: Optional[torch.Tensor] = None,
+        x_index_per_token: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
             frame_index_per_token=frame_index_per_token,
+            y_index_per_token=y_index_per_token,
+            x_index_per_token=x_index_per_token,
             key_padding_mask=key_padding_mask,
         )
         x = x + self.mlp(self.norm2(x))
@@ -244,6 +339,8 @@ class ARCFlowViT(nn.Module):
         dropout: float = 0.1,
         framewise_causal_attention: bool = False,
         attention_backend: str = "auto",
+        rope_3d: bool = False,
+        rope_base: float = 10000.0,
     ) -> None:
         super().__init__()
         self.image_size = image_size
@@ -253,13 +350,21 @@ class ARCFlowViT(nn.Module):
         self.embed_dim = embed_dim
         self.framewise_causal_attention = framewise_causal_attention
         self.attention_backend = attention_backend
+        self.rope_3d = rope_3d
+        self.rope_base = rope_base
         self.depth = depth
+        self.use_custom_attention_blocks = framewise_causal_attention or rope_3d
 
         self.input_proj = nn.Linear(num_colors, embed_dim)
         self.frame_embed = nn.Embedding(max_frames, embed_dim)
         self.spatial_embed = nn.Parameter(torch.zeros(1, self.spatial_tokens, embed_dim))
         token_frame_index = torch.arange(max_frames, dtype=torch.long).repeat_interleave(self.spatial_tokens)
         self.register_buffer("token_frame_index", token_frame_index, persistent=False)
+        token_spatial_index = torch.arange(self.spatial_tokens, dtype=torch.long).repeat(max_frames)
+        token_y_index = token_spatial_index // self.image_size
+        token_x_index = token_spatial_index % self.image_size
+        self.register_buffer("token_y_index", token_y_index, persistent=False)
+        self.register_buffer("token_x_index", token_x_index, persistent=False)
 
         self.time_embed_base = SinusoidalTimeEmbedding(embed_dim)
         self.time_embed_layers = nn.ModuleList(
@@ -273,7 +378,7 @@ class ARCFlowViT(nn.Module):
             ]
         )
 
-        if framewise_causal_attention:
+        if self.use_custom_attention_blocks:
             self.encoder_layers = nn.ModuleList(
                 [
                     FramewiseTransformerBlock(
@@ -282,6 +387,9 @@ class ARCFlowViT(nn.Module):
                         mlp_ratio=mlp_ratio,
                         dropout=dropout,
                         attention_backend=attention_backend,
+                        causal=framewise_causal_attention,
+                        use_3d_rope=rope_3d,
+                        rope_base=rope_base,
                     )
                     for _ in range(depth)
                 ]
@@ -340,6 +448,8 @@ class ARCFlowViT(nn.Module):
 
         tokens = tokens.reshape(batch_size, frames * self.spatial_tokens, self.embed_dim)
         frame_index_per_token = self.token_frame_index[: frames * self.spatial_tokens]
+        y_index_per_token = self.token_y_index[: frames * self.spatial_tokens]
+        x_index_per_token = self.token_x_index[: frames * self.spatial_tokens]
 
         key_padding_mask = None
         if frame_valid_mask is not None:
@@ -354,10 +464,12 @@ class ARCFlowViT(nn.Module):
                 base_time_embed.reshape(-1, self.embed_dim)
             ).reshape(batch_size, frames, self.embed_dim)
             encoded = encoded + layer_time_embed[:, frame_index_per_token, :]
-            if self.framewise_causal_attention:
+            if self.use_custom_attention_blocks:
                 encoded = layer(
                     encoded,
                     frame_index_per_token=frame_index_per_token,
+                    y_index_per_token=y_index_per_token,
+                    x_index_per_token=x_index_per_token,
                     key_padding_mask=key_padding_mask,
                 )
             else:
