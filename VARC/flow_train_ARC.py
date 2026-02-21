@@ -76,6 +76,15 @@ def autocast_context(device: torch.device, enabled: bool):
     return nullcontext()
 
 
+def cudagraph_step_begin_if_available() -> None:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is None:
+        return
+    mark_step_begin = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if callable(mark_step_begin):
+        mark_step_begin()
+
+
 def maybe_compile_model(
     model: torch.nn.Module,
     args: argparse.Namespace,
@@ -316,6 +325,7 @@ def denoise_last_solution_frame(
         frame_times = torch.zeros((batch_size, frame_count), dtype=torch.float32, device=device)
         frame_times[batch_idx, target_frame_index] = t
 
+        cudagraph_step_begin_if_available()
         with autocast_context(device, autocast_enabled):
             pred_velocity = model(state, frame_times, frame_valid_mask=frame_valid_mask)
         state[batch_idx, target_frame_index] = state[batch_idx, target_frame_index] - pred_velocity[batch_idx, target_frame_index] * dt
@@ -436,6 +446,7 @@ def evaluate_flow_matching_loss(
             max_t=max_noise_level,
         )
         x_t, target_velocity = build_noisy_state(x0, frame_times)
+        cudagraph_step_begin_if_available()
         with autocast_context(device, autocast_enabled):
             pred_velocity = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
         loss = flow_matching_loss(
@@ -582,6 +593,7 @@ def train(args: argparse.Namespace) -> None:
             )
 
             x_t, target_velocity = build_noisy_state(x0, frame_times)
+            cudagraph_step_begin_if_available()
             with autocast_context(device, bf16_autocast):
                 pred_velocity = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
             loss = flow_matching_loss(

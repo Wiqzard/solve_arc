@@ -76,6 +76,15 @@ def autocast_context(device: torch.device, enabled: bool):
     return nullcontext()
 
 
+def cudagraph_step_begin_if_available() -> None:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is None:
+        return
+    mark_step_begin = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if callable(mark_step_begin):
+        mark_step_begin()
+
+
 def maybe_compile_model(
     model: torch.nn.Module,
     args: argparse.Namespace,
@@ -532,6 +541,7 @@ def denoise_last_solution_frame_discrete(
         frame_times[batch_idx, target_frame_index] = t
 
         state_onehot = one_hot_frames(state, num_colors=num_colors)
+        cudagraph_step_begin_if_available()
         with autocast_context(device, autocast_enabled):
             logits = model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask)
         target_logits = logits[batch_idx, target_frame_index].float()
@@ -686,6 +696,7 @@ def evaluate_discrete_flow_loss(
             beta=beta,
         )
         x_t = one_hot_frames(x_t_tokens, num_colors=num_colors)
+        cudagraph_step_begin_if_available()
         with autocast_context(device, autocast_enabled):
             logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
         loss = discrete_flow_matching_loss(
@@ -841,6 +852,7 @@ def train(args: argparse.Namespace) -> None:
                 beta=args.discrete_rate,
             )
             x_t = one_hot_frames(x_t_tokens, num_colors=args.num_colors)
+            cudagraph_step_begin_if_available()
             with autocast_context(device, bf16_autocast):
                 logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
             loss = discrete_flow_matching_loss(
