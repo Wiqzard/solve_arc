@@ -21,6 +21,9 @@ TASK_ID_KEYS = (
 )
 EXAMPLE_LIST_KEYS = ("train", "examples", "pairs", "samples", "records", "data", "items")
 TASK_CONTAINER_KEYS = ("tasks", "task_map", "problems")
+INPUT_KEYS = ("input", "x", "in", "input_grid", "input_image")
+OUTPUT_KEYS = ("output", "y", "out", "output_grid", "output_image")
+SERIALIZED_KEYS = ("task", "problem", "arc_task", "json", "task_json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,26 +113,61 @@ def _normalize_grid(grid: Any) -> Optional[List[List[int]]]:
     return rows
 
 
+def _dict_get_any(obj: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
+    for key in keys:
+        if key in obj:
+            return obj[key]
+    return None
+
+
+def _parse_if_json_string(node: Any) -> Optional[Any]:
+    if not isinstance(node, str):
+        return None
+    text = node.strip()
+    if not text or text[0] not in "[{":
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
 def _extract_examples(node: Any) -> List[Dict[str, List[List[int]]]]:
+    parsed = _parse_if_json_string(node)
+    if parsed is not None:
+        return _extract_examples(parsed)
+
+    if isinstance(node, tuple):
+        node = list(node)
+
     examples: List[Dict[str, List[List[int]]]] = []
     if isinstance(node, dict):
-        if "input" in node and "output" in node:
-            input_grid = _normalize_grid(node["input"])
-            output_grid = _normalize_grid(node["output"])
+        input_candidate = _dict_get_any(node, INPUT_KEYS)
+        output_candidate = _dict_get_any(node, OUTPUT_KEYS)
+        if input_candidate is not None and output_candidate is not None:
+            input_grid = _normalize_grid(input_candidate)
+            output_grid = _normalize_grid(output_candidate)
             if input_grid is not None and output_grid is not None:
                 return [{"input": input_grid, "output": output_grid}]
 
         for key in EXAMPLE_LIST_KEYS:
             value = node.get(key)
-            if isinstance(value, list):
+            if isinstance(value, (list, dict, tuple, str)):
                 examples.extend(_extract_examples(value))
 
-        task_obj = node.get("task")
-        if isinstance(task_obj, dict):
-            examples.extend(_extract_examples(task_obj))
+        for key in SERIALIZED_KEYS:
+            value = node.get(key)
+            if isinstance(value, (list, dict, tuple, str)):
+                examples.extend(_extract_examples(value))
         return examples
 
     if isinstance(node, list):
+        # Pair format: [input_grid, output_grid]
+        if len(node) == 2:
+            input_grid = _normalize_grid(node[0])
+            output_grid = _normalize_grid(node[1])
+            if input_grid is not None and output_grid is not None:
+                return [{"input": input_grid, "output": output_grid}]
         for item in node:
             examples.extend(_extract_examples(item))
     return examples
@@ -155,8 +193,14 @@ def _collect_task_examples(
             task_examples[task_name].extend(_extract_examples(payload["train"]))
             return
 
+        direct_examples = _extract_examples(payload)
+        if direct_examples:
+            task_name = _get_task_name(payload, source_name)
+            task_examples[task_name].extend(direct_examples)
+            return
+
         # Flat task map format: {task_id: {...}} or {task_id: [...]}
-        if "input" not in payload and "output" not in payload:
+        if _dict_get_any(payload, INPUT_KEYS) is None and _dict_get_any(payload, OUTPUT_KEYS) is None:
             found_task_map = False
             for raw_task_name, task_payload in payload.items():
                 if isinstance(task_payload, (dict, list)):
@@ -169,7 +213,7 @@ def _collect_task_examples(
                 return
 
         task_name = _get_task_name(payload, source_name)
-        task_examples[task_name].extend(_extract_examples(payload))
+        task_examples[task_name].extend(direct_examples)
         return
 
     if isinstance(payload, list):
