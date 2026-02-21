@@ -363,6 +363,51 @@ When `--use-wandb` is enabled, eval logs also include generated sample panels (`
 - predicted output
 - ground-truth output
 
+### 8. Hyperparameter search
+You can run automatic hyperparameter search for `flow_train_discrete_ARC.py` with the included launcher:
+
+Random search:
+```bash
+python script/hparam_search_flow_discrete.py \
+  --mode random \
+  --num-trials 12 \
+  --workspace . \
+  --output-dir sweeps/flow_discrete_hparam \
+  --include-rearc \
+  --include-barc \
+  --bf16-autocast \
+  --use-wandb
+```
+
+Grid search:
+```bash
+python script/hparam_search_flow_discrete.py \
+  --mode grid \
+  --search-space-json '{"learning-rate":[1e-4,2e-4],"depth":[10,14],"discrete-rate":[3.0,5.0],"sample-steps":[20,40]}' \
+  --workspace . \
+  --output-dir sweeps/flow_discrete_grid \
+  --include-rearc \
+  --include-barc \
+  --bf16-autocast \
+  --use-wandb
+```
+
+The script writes:
+- trial logs under `sweeps/.../trial_xxxx/train.log`
+- checkpoints under each trial folder
+- `results.jsonl` and `results.csv` summary files
+
+You can also use existing packages/services:
+- Weights & Biases Sweeps (template: `script/wandb_sweep_flow_discrete.yaml`)
+- Optuna
+- Ray Tune
+
+W&B sweep example:
+```bash
+wandb sweep script/wandb_sweep_flow_discrete.yaml
+wandb agent <entity>/<project>/<sweep_id>
+```
+
 ### Important hyperparameters
 
 #### Training hyperparmeters

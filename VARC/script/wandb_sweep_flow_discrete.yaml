@@ -1,0 +1,65 @@
+program: flow_train_discrete_ARC.py
+method: bayes
+metric:
+  goal: maximize
+  name: eval/task_acc
+
+parameters:
+  learning-rate:
+    values: [0.0001, 0.0002, 0.0003]
+  depth:
+    values: [10, 14]
+  discrete-rate:
+    values: [3.0, 5.0, 7.0]
+  sample-steps:
+    values: [20, 40]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --data-root
+  - raw_data/ARC-AGI
+  - --train-split
+  - training
+  - --eval-split
+  - evaluation
+  - --num-demos
+  - "3"
+  - --image-size
+  - "30"
+  - --num-colors
+  - "12"
+  - --embed-dim
+  - "512"
+  - --num-heads
+  - "8"
+  - --mlp-ratio
+  - "4.0"
+  - --dropout
+  - "0.0"
+  - --batch-size
+  - "4"
+  - --eval-batch-size
+  - "8"
+  - --log-every-steps
+  - "5"
+  - --eval-every-steps
+  - "500"
+  - --epochs
+  - "20"
+  - --weight-decay
+  - "0"
+  - --lr-scheduler
+  - cosine
+  - --reverse-sampler
+  - sample
+  - --attention-backend
+  - auto
+  - --include-rearc
+  - --include-barc
+  - --bf16-autocast
+  - --use-wandb
+  - --wandb-project
+  - VisionARC
+  - ${args}
