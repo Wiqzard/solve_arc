@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rearc-limit", type=int, default=-1)
     parser.add_argument("--include-barc", action="store_true", default=True)
     parser.add_argument("--barc-path", type=str, default="raw_data/BARC")
-    parser.add_argument("--barc-limit", type=int, default=-1)
+    parser.add_argument("--barc-limit", type=int, default=400000)
 
     parser.add_argument("--framewise-causal-attention", action="store_true", default=True)
     parser.add_argument("--flow-train-translation-aug", action="store_true", default=True)

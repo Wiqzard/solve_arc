@@ -57,6 +57,8 @@ command:
   - --framewise-causal-attention
   - --include-rearc
   - --include-barc
+  - --barc-limit
+  - "400000"
   - --bf16-autocast
   - --compile
   - --sample-steps
