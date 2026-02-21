@@ -14,9 +14,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 DEFAULT_SEARCH_SPACE: Dict[str, List[Any]] = {
     "learning-rate": [1e-4, 2e-4, 3e-4],
-    "depth": [10, 14],
     "discrete-rate": [3.0, 5.0, 7.0],
-    "sample-steps": [20, 40],
 }
 
 
@@ -52,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=30)
     parser.add_argument("--num-colors", type=int, default=12)
     parser.add_argument("--embed-dim", type=int, default=512)
+    parser.add_argument("--depth", type=int, default=14)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--mlp-ratio", type=float, default=4.0)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -60,28 +59,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every-steps", type=int, default=5)
     parser.add_argument("--eval-every-steps", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--lr-scheduler", type=str, default="cosine", choices=("cosine", "none"))
     parser.add_argument("--reverse-sampler", type=str, default="sample", choices=("sample", "argmax"))
     parser.add_argument("--attention-backend", type=str, default="auto", choices=("auto", "flex", "sdpa"))
 
-    parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument("--use-wandb", action="store_true", default=True)
     parser.add_argument("--wandb-project", type=str, default="VisionARC")
     parser.add_argument("--wandb-run-prefix", type=str, default="flow-discrete-hparam")
 
-    parser.add_argument("--include-rearc", action="store_true")
+    parser.add_argument("--include-rearc", action="store_true", default=True)
     parser.add_argument("--rearc-path", type=str, default="raw_data/re_arc")
     parser.add_argument("--rearc-limit", type=int, default=-1)
-    parser.add_argument("--include-barc", action="store_true")
+    parser.add_argument("--include-barc", action="store_true", default=True)
     parser.add_argument("--barc-path", type=str, default="raw_data/BARC")
     parser.add_argument("--barc-limit", type=int, default=-1)
 
-    parser.add_argument("--bf16-autocast", action="store_true")
-    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--bf16-autocast", action="store_true", default=True)
+    parser.add_argument("--compile", action="store_true", default=True)
     parser.add_argument("--compile-mode", type=str, default="reduce-overhead", choices=("default", "reduce-overhead", "max-autotune"))
-    parser.add_argument("--framewise-causal-attention", action="store_true")
+    parser.add_argument("--framewise-causal-attention", action="store_true", default=True)
     parser.add_argument("--flow-train-translation-aug", action="store_true")
     parser.add_argument("--flow-train-resolution-aug", action="store_true")
+    parser.add_argument("--sample-steps", type=int, default=20)
     parser.add_argument("--extra-args", type=str, default="", help="Extra args appended verbatim to every run.")
     parser.add_argument("--python-bin", type=str, default=sys.executable)
     return parser.parse_args()
@@ -232,6 +233,8 @@ def main() -> None:
             str(args.num_colors),
             "--embed-dim",
             str(args.embed_dim),
+            "--depth",
+            str(args.depth),
             "--num-heads",
             str(args.num_heads),
             "--mlp-ratio",
@@ -248,6 +251,8 @@ def main() -> None:
             str(args.eval_every_steps),
             "--epochs",
             str(args.epochs),
+            "--learning-rate",
+            str(args.learning_rate),
             "--weight-decay",
             str(args.weight_decay),
             "--lr-scheduler",
@@ -256,6 +261,8 @@ def main() -> None:
             args.reverse_sampler,
             "--attention-backend",
             args.attention_backend,
+            "--sample-steps",
+            str(args.sample_steps),
             "--save-path",
             str(save_path),
             "--best-save-path",

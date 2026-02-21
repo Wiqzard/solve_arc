@@ -12,6 +12,7 @@ python flow_train_discrete_ARC.py \
   --num-heads 8 \
   --mlp-ratio 4.0 \
   --dropout 0.0 \
+  --framewise-causal-attention \
   --batch-size 4 \
   --eval-batch-size 8 \
   --log-every-steps 5 \
@@ -22,6 +23,7 @@ python flow_train_discrete_ARC.py \
   --include-rearc \
   --include-barc \
   --bf16-autocast \
+  --compile \
   --discrete-rate 5.0 \
   --reverse-sampler "sample" \
   --sample-steps 20 \

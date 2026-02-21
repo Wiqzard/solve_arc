@@ -7,12 +7,8 @@ metric:
 parameters:
   learning-rate:
     values: [0.0001, 0.0002, 0.0003]
-  depth:
-    values: [10, 14]
   discrete-rate:
     values: [3.0, 5.0, 7.0]
-  sample-steps:
-    values: [20, 40]
 
 command:
   - ${env}
@@ -32,6 +28,8 @@ command:
   - "12"
   - --embed-dim
   - "512"
+  - --depth
+  - "14"
   - --num-heads
   - "8"
   - --mlp-ratio
@@ -56,9 +54,13 @@ command:
   - sample
   - --attention-backend
   - auto
+  - --framewise-causal-attention
   - --include-rearc
   - --include-barc
   - --bf16-autocast
+  - --compile
+  - --sample-steps
+  - "20"
   - --use-wandb
   - --wandb-project
   - VisionARC
