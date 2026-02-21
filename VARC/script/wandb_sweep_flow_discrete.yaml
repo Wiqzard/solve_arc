@@ -1,8 +1,8 @@
 program: flow_train_discrete_ARC.py
 method: bayes
 metric:
-  goal: maximize
-  name: eval/task_acc
+  goal: minimize
+  name: eval/loss
 
 parameters:
   learning-rate:

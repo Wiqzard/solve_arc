@@ -633,6 +633,72 @@ def evaluate_last_frame_accuracy(
     return {"sample_acc": sample_acc, "task_acc": task_acc, "samples": float(sample_total)}, examples
 
 
+@torch.no_grad()
+def evaluate_discrete_flow_loss(
+    model: ARCFlowViT,
+    loader: torch.utils.data.DataLoader,
+    *,
+    device: torch.device,
+    num_colors: int,
+    min_noise_level: float,
+    max_noise_level: float,
+    beta: float,
+    target_only: bool,
+    show_progress: bool = False,
+    autocast_enabled: bool = False,
+) -> float:
+    if loader is None:
+        return float("nan")
+
+    running_loss = 0.0
+    seen = 0
+    eval_iterator = tqdm(loader, desc="eval_loss", total=len(loader), leave=False, disable=not show_progress)
+    for batch in eval_iterator:
+        frames = batch["frames"].to(device)
+        frame_valid_mask = batch["frame_valid_mask"].to(device)
+        target_frame_index = batch["target_frame_index"].to(device)
+        target_valid_mask = batch["target_valid_mask"].to(device)
+
+        batch_size, frame_count, _, _ = frames.shape
+        frame_times = sample_frame_times(
+            batch_size=batch_size,
+            frames=frame_count,
+            device=device,
+            min_t=min_noise_level,
+            max_t=max_noise_level,
+        )
+        x_t_tokens = sample_xt_from_qt(
+            frames,
+            frame_valid_mask,
+            frame_times,
+            num_colors=num_colors,
+            beta=beta,
+        )
+        x_t = one_hot_frames(x_t_tokens, num_colors=num_colors)
+        with autocast_context(device, autocast_enabled):
+            logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+        loss = discrete_flow_matching_loss(
+            logits.float(),
+            frames,
+            x_t_tokens,
+            frame_valid_mask=frame_valid_mask,
+            target_frame_index=target_frame_index,
+            target_valid_mask=target_valid_mask,
+            beta=beta,
+            target_only=target_only,
+        )
+
+        running_loss += float(loss.item()) * batch_size
+        seen += batch_size
+
+    if dist.is_available() and dist.is_initialized():
+        totals = torch.tensor([running_loss, float(seen)], device=device)
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        running_loss = float(totals[0].item())
+        seen = int(totals[1].item())
+    return running_loss / max(seen, 1)
+
+
 def save_checkpoint(
     *,
     save_path: Path,
@@ -722,7 +788,7 @@ def train(args: argparse.Namespace) -> None:
             config=vars(args),
         )
 
-    best_task_acc = float("-inf")
+    best_eval_loss = float("inf")
     global_step = 0
     eval_round = 0
     eval_on_steps = args.eval_every_steps > 0
@@ -821,6 +887,18 @@ def train(args: argparse.Namespace) -> None:
                 eval_round += 1
                 if eval_sampler is not None:
                     eval_sampler.set_epoch(eval_round)
+                eval_loss = evaluate_discrete_flow_loss(
+                    model,
+                    eval_loader if eval_loader is not None else train_loader,
+                    device=device,
+                    num_colors=args.num_colors,
+                    min_noise_level=args.min_noise_level,
+                    max_noise_level=args.max_noise_level,
+                    beta=args.discrete_rate,
+                    target_only=args.loss_on_target_only,
+                    show_progress=False,
+                    autocast_enabled=bf16_autocast,
+                )
                 eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                     model,
                     eval_loader if eval_loader is not None else train_loader,
@@ -840,6 +918,7 @@ def train(args: argparse.Namespace) -> None:
                                 "eval(trigger=steps)",
                                 f"epoch={epoch}",
                                 f"step={global_step}",
+                                f"loss={eval_loss:.6f}",
                                 f"sample_acc={eval_metrics['sample_acc']:.4f}",
                                 f"task_acc={eval_metrics['task_acc']:.4f}",
                             ]
@@ -848,6 +927,8 @@ def train(args: argparse.Namespace) -> None:
                     if wandb_run is not None:
                         wandb_run.log(
                             {
+                                "eval_loss": eval_loss,
+                                "eval/loss": eval_loss,
                                 "eval/sample_acc": eval_metrics["sample_acc"],
                                 "eval/task_acc": eval_metrics["task_acc"],
                                 "eval/trigger_step": global_step,
@@ -855,15 +936,17 @@ def train(args: argparse.Namespace) -> None:
                             },
                             step=global_step,
                         )
-                    if eval_metrics["task_acc"] > best_task_acc:
-                        best_task_acc = eval_metrics["task_acc"]
+                    if np.isfinite(eval_loss) and eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        best_metrics = dict(eval_metrics)
+                        best_metrics["eval_loss"] = eval_loss
                         save_checkpoint(
                             save_path=Path(args.best_save_path),
                             model=model,
                             optimizer=optimizer,
                             epoch=epoch,
                             args=args,
-                            metrics=eval_metrics,
+                            metrics=best_metrics,
                         )
                     if wandb_run is not None and eval_examples:
                         viz_images = []
@@ -907,6 +990,18 @@ def train(args: argparse.Namespace) -> None:
             eval_round += 1
             if eval_sampler is not None:
                 eval_sampler.set_epoch(eval_round)
+            eval_loss = evaluate_discrete_flow_loss(
+                model,
+                eval_loader if eval_loader is not None else train_loader,
+                device=device,
+                num_colors=args.num_colors,
+                min_noise_level=args.min_noise_level,
+                max_noise_level=args.max_noise_level,
+                beta=args.discrete_rate,
+                target_only=args.loss_on_target_only,
+                show_progress=False,
+                autocast_enabled=bf16_autocast,
+            )
             eval_metrics, eval_examples = evaluate_last_frame_accuracy(
                 model,
                 eval_loader if eval_loader is not None else train_loader,
@@ -922,19 +1017,22 @@ def train(args: argparse.Namespace) -> None:
             if is_main:
                 log_data.update(
                     {
+                        "eval_loss": eval_loss,
                         "eval_sample_acc": eval_metrics["sample_acc"],
                         "eval_task_acc": eval_metrics["task_acc"],
                     }
                 )
-                if eval_metrics["task_acc"] > best_task_acc:
-                    best_task_acc = eval_metrics["task_acc"]
+                if np.isfinite(eval_loss) and eval_loss < best_eval_loss:
+                    best_eval_loss = eval_loss
+                    best_metrics = dict(eval_metrics)
+                    best_metrics["eval_loss"] = eval_loss
                     save_checkpoint(
                         save_path=Path(args.best_save_path),
                         model=model,
                         optimizer=optimizer,
                         epoch=epoch,
                         args=args,
-                        metrics=eval_metrics,
+                        metrics=best_metrics,
                     )
                 if wandb_run is not None and eval_examples:
                     viz_images = []
@@ -965,6 +1063,7 @@ def train(args: argparse.Namespace) -> None:
                         f"loss={log_data['train_loss']:.6f}",
                         f"time={log_data['epoch_time']:.1f}s",
                         f"lr={log_data['lr']:.6f}",
+                        f"eval_loss={log_data.get('eval_loss', float('nan')):.6f}",
                         f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
                         f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
                     ]
@@ -972,7 +1071,10 @@ def train(args: argparse.Namespace) -> None:
             )
 
             if wandb_run is not None:
-                wandb_run.log(log_data, step=global_step)
+                wandb_payload = dict(log_data)
+                if "eval_loss" in log_data:
+                    wandb_payload["eval/loss"] = log_data["eval_loss"]
+                wandb_run.log(wandb_payload, step=global_step)
 
             save_checkpoint(
                 save_path=Path(args.save_path),

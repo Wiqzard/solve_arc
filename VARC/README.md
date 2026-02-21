@@ -378,6 +378,7 @@ python script/hparam_search_flow_discrete.py \
   --bf16-autocast \
   --use-wandb
 ```
+Default ranking is `--metric-key eval_loss --metric-goal minimize`.
 
 Grid search:
 ```bash

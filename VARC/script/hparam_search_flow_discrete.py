@@ -29,7 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workspace", type=str, default=".", help="Repo root where training script is located.")
     parser.add_argument("--output-dir", type=str, default="sweeps/flow_discrete_hparam")
-    parser.add_argument("--metric-key", type=str, default="task_acc", help="Metric key to rank trials by.")
+    parser.add_argument("--metric-key", type=str, default="eval_loss", help="Metric key to rank trials by.")
+    parser.add_argument("--metric-goal", type=str, default="minimize", choices=("minimize", "maximize"))
 
     parser.add_argument(
         "--search-space-file",
@@ -139,6 +140,10 @@ def _metric_from_checkpoint(path: Path, metric_key: str) -> float:
     candidates = [
         metric_key,
         f"eval_{metric_key}",
+        metric_key.replace("/", "_"),
+        metric_key.replace("_", "/"),
+        "eval_loss",
+        "eval/loss",
         "task_acc",
         "eval_task_acc",
         "sample_acc",
@@ -200,7 +205,7 @@ def main() -> None:
 
     run_rows: List[Dict[str, Any]] = []
     best_row: Dict[str, Any] | None = None
-    best_score = float("-inf")
+    best_score = float("inf") if args.metric_goal == "minimize" else float("-inf")
 
     for trial_index, params in enumerate(trials, start=1):
         trial_name = f"trial_{trial_index:04d}"
@@ -310,9 +315,11 @@ def main() -> None:
         with results_jsonl.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
 
-        if return_code == 0 and score == score and score > best_score:
-            best_score = score
-            best_row = row
+        if return_code == 0 and score == score:
+            is_better = score < best_score if args.metric_goal == "minimize" else score > best_score
+            if is_better:
+                best_score = score
+                best_row = row
 
         print(
             f"Trial {trial_name} finished: rc={return_code} metric={score} duration={duration_sec:.1f}s"
