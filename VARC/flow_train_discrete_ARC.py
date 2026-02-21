@@ -1072,6 +1072,11 @@ def train(args: argparse.Namespace) -> None:
                     )
 
             if eval_on_steps and global_step % args.eval_every_steps == 0:
+                # Free large per-step training tensors before eval to avoid transient OOM spikes.
+                del frames, frame_valid_mask, target_frame_index, target_valid_mask
+                del frame_times, x_t_tokens, x_t, logits, loss
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
                 eval_round += 1
                 if eval_sampler is not None:
                     eval_sampler.set_epoch(eval_round)
