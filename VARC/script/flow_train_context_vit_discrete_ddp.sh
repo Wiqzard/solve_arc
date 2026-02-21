@@ -59,6 +59,8 @@ log_args=(
   --wandb-project "VisionARC"
   --wandb-num-vis-samples 8
   --wandb-vis-scale 8
+  --wandb-train-vis-every-steps 500
+  --wandb-train-vis-samples 2
   --wandb-run-name "flow-context-vit-discrete-ddp"
 )
 

@@ -266,6 +266,18 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Pixel upscale factor for logged ARC image panels.",
     )
+    parser.add_argument(
+        "--wandb-train-vis-every-steps",
+        type=int,
+        default=0,
+        help="If > 0, log training-step visualizations every N optimizer steps.",
+    )
+    parser.add_argument(
+        "--wandb-train-vis-samples",
+        type=int,
+        default=2,
+        help="Number of samples from the current train batch to visualize.",
+    )
     return parser.parse_args()
 
 
@@ -298,6 +310,14 @@ def panel_order_string(num_demos: int) -> str:
     for demo_id in range(1, num_demos + 1):
         parts.extend([f"D{demo_id}-in", f"D{demo_id}-out"])
     parts.extend(["Q-in", "Pred", "GT"])
+    return ",".join(parts)
+
+
+def train_panel_order_string(num_demos: int) -> str:
+    parts: List[str] = []
+    for demo_id in range(1, num_demos + 1):
+        parts.extend([f"D{demo_id}-in", f"D{demo_id}-out"])
+    parts.extend(["Q-in", "Q-noisy", "Q-pred", "Q-gt"])
     return ",".join(parts)
 
 
@@ -409,6 +429,75 @@ def build_eval_visualization(
         )
     )
 
+    return make_image_grid(panels, cols=4, gap=4)
+
+
+def build_train_step_visualization(
+    *,
+    frames: torch.Tensor,
+    frame_valid_mask: torch.Tensor,
+    noisy_target: torch.Tensor,
+    prediction: torch.Tensor,
+    target_output: torch.Tensor,
+    target_valid_mask: torch.Tensor,
+    num_demos: int,
+    scale: int,
+    num_colors: int,
+) -> np.ndarray:
+    panels: List[np.ndarray] = []
+    for demo_idx in range(num_demos):
+        input_idx = 2 * demo_idx
+        output_idx = input_idx + 1
+        panels.append(
+            render_grid_rgb(
+                frames[input_idx],
+                frame_valid_mask[input_idx],
+                scale=scale,
+                num_colors=num_colors,
+            )
+        )
+        panels.append(
+            render_grid_rgb(
+                frames[output_idx],
+                frame_valid_mask[output_idx],
+                scale=scale,
+                num_colors=num_colors,
+            )
+        )
+
+    query_input_idx = 2 * num_demos
+    panels.append(
+        render_grid_rgb(
+            frames[query_input_idx],
+            frame_valid_mask[query_input_idx],
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+    panels.append(
+        render_grid_rgb(
+            noisy_target,
+            target_valid_mask,
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+    panels.append(
+        render_grid_rgb(
+            prediction,
+            target_valid_mask,
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
+    panels.append(
+        render_grid_rgb(
+            target_output,
+            target_valid_mask,
+            scale=scale,
+            num_colors=num_colors,
+        )
+    )
     return make_image_grid(panels, cols=4, gap=4)
 
 
@@ -829,7 +918,14 @@ def train(args: argparse.Namespace) -> None:
         step_loss_count = 0
 
         total_batches = len(train_loader)
-        for batch_idx, batch in enumerate(train_loader, 1):
+        train_iterator = tqdm(
+            train_loader,
+            desc=f"train {epoch}/{args.epochs}",
+            total=total_batches,
+            leave=False,
+            disable=not is_main,
+        )
+        for batch_idx, batch in enumerate(train_iterator, 1):
             frames = batch["frames"].to(device)
             frame_valid_mask = batch["frame_valid_mask"].to(device)
             target_frame_index = batch["target_frame_index"].to(device)
@@ -879,22 +975,30 @@ def train(args: argparse.Namespace) -> None:
             global_step += 1
             step_loss_accum += loss_value
             step_loss_count += 1
+            if is_main and hasattr(train_iterator, "set_postfix"):
+                train_iterator.set_postfix(
+                    step=global_step,
+                    loss=f"{loss_value:.4f}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                )
 
             if is_main and args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
                 step_avg_loss = step_loss_accum / max(step_loss_count, 1)
                 elapsed = time.time() - epoch_start
-                print(
-                    " | ".join(
-                        [
-                            f"epoch={epoch}",
-                            f"step={global_step}",
-                            f"batch={batch_idx}/{total_batches}",
-                            f"step_loss={loss_value:.6f}",
-                            f"step_avg_loss={step_avg_loss:.6f}",
-                            f"elapsed={elapsed:.1f}s",
-                        ]
-                    )
+                log_line = " | ".join(
+                    [
+                        f"epoch={epoch}",
+                        f"step={global_step}",
+                        f"batch={batch_idx}/{total_batches}",
+                        f"step_loss={loss_value:.6f}",
+                        f"step_avg_loss={step_avg_loss:.6f}",
+                        f"elapsed={elapsed:.1f}s",
+                    ]
                 )
+                if hasattr(train_iterator, "write"):
+                    train_iterator.write(log_line)
+                else:
+                    print(log_line)
                 if wandb_run is not None:
                     wandb_run.log(
                         {
@@ -907,6 +1011,42 @@ def train(args: argparse.Namespace) -> None:
                     )
                 step_loss_accum = 0.0
                 step_loss_count = 0
+
+            if (
+                is_main
+                and wandb_run is not None
+                and args.wandb_train_vis_every_steps > 0
+                and global_step % args.wandb_train_vis_every_steps == 0
+            ):
+                num_vis = min(int(args.wandb_train_vis_samples), frames.size(0))
+                if num_vis > 0:
+                    train_viz_images = []
+                    pred_tokens = logits.float().argmax(dim=-1).detach()
+                    for sample_idx in range(num_vis):
+                        target_idx = int(target_frame_index[sample_idx].item())
+                        image = build_train_step_visualization(
+                            frames=frames[sample_idx].detach().cpu(),
+                            frame_valid_mask=frame_valid_mask[sample_idx].detach().cpu(),
+                            noisy_target=x_t_tokens[sample_idx, target_idx].detach().cpu(),
+                            prediction=pred_tokens[sample_idx, target_idx].detach().cpu(),
+                            target_output=frames[sample_idx, target_idx].detach().cpu(),
+                            target_valid_mask=target_valid_mask[sample_idx].detach().cpu(),
+                            num_demos=args.num_demos,
+                            scale=max(int(args.wandb_vis_scale), 1),
+                            num_colors=args.num_colors,
+                        )
+                        caption = (
+                            f"train_step={global_step} | sample={sample_idx} | "
+                            f"order={train_panel_order_string(args.num_demos)}"
+                        )
+                        train_viz_images.append(wandb.Image(image, caption=caption))
+                    wandb_run.log(
+                        {
+                            "train/step_visualizations": train_viz_images,
+                            "train/num_step_visualized": len(train_viz_images),
+                        },
+                        step=global_step,
+                    )
 
             if eval_on_steps and global_step % args.eval_every_steps == 0:
                 eval_round += 1
