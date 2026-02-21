@@ -357,6 +357,7 @@ class ARCFlowViT(nn.Module):
         max_frames: int,
         embed_dim: int = 512,
         depth: int = 10,
+        n_loops: int = 1,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
@@ -376,6 +377,9 @@ class ARCFlowViT(nn.Module):
         self.rope_3d = rope_3d
         self.rope_base = rope_base
         self.depth = depth
+        if n_loops < 1:
+            raise ValueError(f"n_loops must be >= 1, got {n_loops}")
+        self.n_loops = n_loops
         self.use_custom_attention_blocks = framewise_causal_attention or rope_3d
 
         self.input_proj = nn.Linear(num_colors, embed_dim)
@@ -482,22 +486,60 @@ class ARCFlowViT(nn.Module):
 
         base_time_embed = self.time_embed_base(frame_times.reshape(-1)).reshape(batch_size, frames, self.embed_dim)
         encoded = tokens
-        for layer_idx, layer in enumerate(self.encoder_layers):
-            layer_time_embed = self.time_embed_layers[layer_idx](
-                base_time_embed.reshape(-1, self.embed_dim)
-            ).reshape(batch_size, frames, self.embed_dim)
-            encoded = encoded + layer_time_embed[:, frame_index_per_token, :]
-            if self.use_custom_attention_blocks:
-                encoded = layer(
-                    encoded,
-                    frame_index_per_token=frame_index_per_token,
-                    y_index_per_token=y_index_per_token,
-                    x_index_per_token=x_index_per_token,
-                    key_padding_mask=key_padding_mask,
-                )
-            else:
-                encoded = layer(encoded, src_key_padding_mask=key_padding_mask)
+        for _ in range(self.n_loops):
+            for layer_idx, layer in enumerate(self.encoder_layers):
+                layer_time_embed = self.time_embed_layers[layer_idx](
+                    base_time_embed.reshape(-1, self.embed_dim)
+                ).reshape(batch_size, frames, self.embed_dim)
+                encoded = encoded + layer_time_embed[:, frame_index_per_token, :]
+                if self.use_custom_attention_blocks:
+                    encoded = layer(
+                        encoded,
+                        frame_index_per_token=frame_index_per_token,
+                        y_index_per_token=y_index_per_token,
+                        x_index_per_token=x_index_per_token,
+                        key_padding_mask=key_padding_mask,
+                    )
+                else:
+                    encoded = layer(encoded, src_key_padding_mask=key_padding_mask)
         encoded = self.norm(encoded)
         velocity = self.head(encoded)
         velocity = velocity.reshape(batch_size, frames, height, width, self.num_colors)
         return velocity
+
+
+class ARCFlowViTLooped(ARCFlowViT):
+    """ARCFlowViT with tied-layer stack applied for multiple loops."""
+
+    def __init__(
+        self,
+        *,
+        image_size: int,
+        num_colors: int,
+        max_frames: int,
+        embed_dim: int = 512,
+        depth: int = 10,
+        n_loops: int = 2,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        framewise_causal_attention: bool = False,
+        attention_backend: str = "auto",
+        rope_3d: bool = False,
+        rope_base: float = 10000.0,
+    ) -> None:
+        super().__init__(
+            image_size=image_size,
+            num_colors=num_colors,
+            max_frames=max_frames,
+            embed_dim=embed_dim,
+            depth=depth,
+            n_loops=n_loops,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            framewise_causal_attention=framewise_causal_attention,
+            attention_backend=attention_backend,
+            rope_3d=rope_3d,
+            rope_base=rope_base,
+        )

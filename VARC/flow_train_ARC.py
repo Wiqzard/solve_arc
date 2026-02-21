@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.ARC_FlowViT import ARCFlowViT
+from src.ARC_FlowViT import ARCFlowViT, ARCFlowViTLooped
 from src.ARC_context_flow_loader import build_flow_context_dataloaders
 try:
     from tqdm.auto import tqdm
@@ -130,6 +130,19 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--embed-dim", type=int, default=512)
     parser.add_argument("--depth", type=int, default=10)
+    parser.add_argument(
+        "--model-arch",
+        type=str,
+        default="flow_vit",
+        choices=("flow_vit", "flow_vit_looped"),
+        help="Model architecture variant.",
+    )
+    parser.add_argument(
+        "--n-loops",
+        type=int,
+        default=2,
+        help="Number of repeated passes through the full layer stack (used by flow_vit_looped).",
+    )
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--mlp-ratio", type=float, default=4.0)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -528,12 +541,17 @@ def train(args: argparse.Namespace) -> None:
         if eval_dataset is not None:
             print(f"Eval episodes: {len(eval_dataset)}")
 
-    model = ARCFlowViT(
+    model_cls = ARCFlowViTLooped if args.model_arch == "flow_vit_looped" else ARCFlowViT
+    model_loops = args.n_loops if args.model_arch == "flow_vit_looped" else 1
+    if is_main:
+        print(f"Model architecture: {args.model_arch} (n_loops={model_loops})")
+    model = model_cls(
         image_size=args.image_size,
         num_colors=args.num_colors,
         max_frames=max_frames,
         embed_dim=args.embed_dim,
         depth=args.depth,
+        n_loops=model_loops,
         num_heads=args.num_heads,
         mlp_ratio=args.mlp_ratio,
         dropout=args.dropout,
