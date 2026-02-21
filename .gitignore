@@ -1,0 +1,87 @@
+*.jpg
+*.mp4
+*.png
+*.gif
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+ckpts/
+data/
+__pycache__
+.ipynb_checkpoints
+*.pth
+UCF-101/
+results/
+wandb/
+*.ipynb
+*.jpg
+*.safetensors
+*.mp4
+*.png
+*.gif
+*.pth
+*.pt
+cache_dir/
+wandb/
+venv/
+.venv/
+runs/
+samples/
+*validation/
+data/
+outputs/
+outputs_video
+checkpoints/
+sbatch.sh
+*.out
+env
+*.o
+**/build/
+**.pyc
+**.txt
+*.log
+weights/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+.eggs/
+
+# MkDocs documentation
+site/
+docs/getting_started/examples/
+docs/inference/examples/
+docs/training/examples/
+docs/distillation/examples/
+!requirements-mkdocs.txt
+
+# VSCode
+.vscode/
+
+# DS Store
+.DS_Store
+
+# vim swap files
+*.swo
+*.swp
+
+# Python pickle files
+*.pkl
+
+# Reference videos
+!fastvideo/tests/ssim/reference_videos/**/*.mp4
+
+# Static images
+!docs/assets/images/**/*.png
+!comfyui/assets/**/*.png
+!comfyui/assets/**/*.gif
+
+dmd_t2v_output/
+preprocess_output_text/
+
