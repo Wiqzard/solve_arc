@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--barc-limit",
         type=int,
         default=-1,
-        help="Maximum number of BARC examples to include per task (use -1 for all examples).",
+        help="Maximum total number of BARC examples to include (use -1 for all examples).",
     )
     
     parser.add_argument(

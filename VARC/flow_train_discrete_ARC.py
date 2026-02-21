@@ -204,7 +204,7 @@ def parse_args() -> argparse.Namespace:
         "--barc-limit",
         type=int,
         default=-1,
-        help="Maximum BARC examples per task (-1 means all).",
+        help="Maximum total BARC train queries to include (-1 means all).",
     )
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))

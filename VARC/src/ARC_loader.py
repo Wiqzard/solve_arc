@@ -97,7 +97,9 @@ class ARCDataset(Dataset):
         task_lookup: Optional[Dict[str, int]] = None,
         extra_train_roots: Optional[Iterable[Path]] = None,
         extra_train_limit: Optional[int] = None,
-        extra_train_specs: Optional[Iterable[Tuple[Path, Optional[int], str]]] = None,
+        extra_train_specs: Optional[
+            Iterable[Tuple[Path, Optional[int], str] | Tuple[Path, Optional[int], str, str]]
+        ] = None,
     ) -> None:
         if subset not in {"train", "test"}:
             raise ValueError("subset must be 'train' or 'test'.")
@@ -161,11 +163,22 @@ class ARCDataset(Dataset):
                         source_name="extra",
                     )
             if extra_train_specs:
-                for extra_root, per_task_limit, source_name in extra_train_specs:
+                for spec in extra_train_specs:
+                    if len(spec) == 3:
+                        extra_root, per_task_limit, source_name = spec
+                        limit_scope = "per_task"
+                    elif len(spec) == 4:
+                        extra_root, per_task_limit, source_name, limit_scope = spec
+                    else:
+                        raise ValueError(
+                            "extra_train_specs entries must be (path, limit, source) "
+                            "or (path, limit, source, limit_scope)."
+                        )
                     self._load_extra_training_data(
                         extra_root=Path(extra_root),
                         limit_per_task=per_task_limit,
                         source_name=source_name,
+                        limit_scope=str(limit_scope),
                     )
 
         if not self.samples:
@@ -351,7 +364,10 @@ class ARCDataset(Dataset):
         extra_root: Path,
         limit_per_task: Optional[int],
         source_name: str,
+        limit_scope: str = "per_task",
     ) -> None:
+        if limit_scope not in {"per_task", "total"}:
+            raise ValueError("limit_scope must be one of: per_task, total")
         files: List[Path] = []
         source_location = str(extra_root)
         if extra_root.is_file() and extra_root.suffix == ".json":
@@ -378,7 +394,10 @@ class ARCDataset(Dataset):
         rng = random.Random(42)
         added_samples = 0
         added_per_task: Dict[str, int] = {}
+        stop_loading = False
         for file_path in files:
+            if stop_loading:
+                break
             with file_path.open("r") as fh:
                 payload = json.load(fh)
             task_sets = self._iter_task_examples_from_payload(
@@ -391,10 +410,16 @@ class ARCDataset(Dataset):
                     continue
 
                 if limit_per_task is not None:
-                    rng.shuffle(valid_examples)
-                    remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    if limit_scope == "per_task":
+                        remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    else:
+                        remaining = limit_per_task - added_samples
                     if remaining <= 0:
+                        if limit_scope == "total":
+                            stop_loading = True
+                            break
                         continue
+                    rng.shuffle(valid_examples)
                     valid_examples = valid_examples[:remaining]
 
                 task_index = self._get_or_add_task_index(task_name)
@@ -412,7 +437,8 @@ class ARCDataset(Dataset):
                 added_per_task[task_name] = added_per_task.get(task_name, 0) + len(valid_examples)
                 added_samples += len(valid_examples)
 
-        print(f"Added {added_samples} {source_name} samples from {source_location}.")
+        limit_desc = "all" if limit_per_task is None else f"{limit_per_task} ({limit_scope})"
+        print(f"Added {added_samples} {source_name} samples from {source_location} [limit={limit_desc}].")
         return None
 
     
@@ -424,13 +450,13 @@ def build_dataloaders(
     world_size: int = 1,
 ):
     root = Path(args.data_root)
-    extra_specs: List[Tuple[Path, Optional[int], str]] = []
+    extra_specs: List[Tuple[Path, Optional[int], str, str]] = []
     if getattr(args, "include_rearc", False):
         rearc_limit = args.rearc_limit if args.rearc_limit >= 0 else None
-        extra_specs.append((Path(args.rearc_path), rearc_limit, "RE-ARC"))
+        extra_specs.append((Path(args.rearc_path), rearc_limit, "RE-ARC", "per_task"))
     if getattr(args, "include_barc", False):
         barc_limit = args.barc_limit if args.barc_limit >= 0 else None
-        extra_specs.append((Path(args.barc_path), barc_limit, "BARC"))
+        extra_specs.append((Path(args.barc_path), barc_limit, "BARC", "total"))
 
 
     train_split = getattr(args, "train_split", "training")

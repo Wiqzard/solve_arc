@@ -35,7 +35,9 @@ class ARCContextFlowDataset(Dataset):
         resolution_augmentation: bool = True,
         extra_train_roots: Optional[Iterable[Path]] = None,
         extra_train_limit: Optional[int] = None,
-        extra_train_specs: Optional[Iterable[Tuple[Path, Optional[int], str]]] = None,
+        extra_train_specs: Optional[
+            Iterable[Tuple[Path, Optional[int], str] | Tuple[Path, Optional[int], str, str]]
+        ] = None,
     ) -> None:
         if mode not in {"train", "eval"}:
             raise ValueError("mode must be 'train' or 'eval'.")
@@ -97,11 +99,22 @@ class ARCContextFlowDataset(Dataset):
                         source_name="extra",
                     )
             if extra_train_specs:
-                for extra_root, per_task_limit, source_name in extra_train_specs:
+                for spec in extra_train_specs:
+                    if len(spec) == 3:
+                        extra_root, per_task_limit, source_name = spec
+                        limit_scope = "per_task"
+                    elif len(spec) == 4:
+                        extra_root, per_task_limit, source_name, limit_scope = spec
+                    else:
+                        raise ValueError(
+                            "extra_train_specs entries must be (path, limit, source) "
+                            "or (path, limit, source, limit_scope)."
+                        )
                     self._load_extra_training_data(
                         extra_root=Path(extra_root),
                         limit_per_task=per_task_limit,
                         source_name=source_name,
+                        limit_scope=str(limit_scope),
                     )
 
         if not self._query_records:
@@ -249,7 +262,10 @@ class ARCContextFlowDataset(Dataset):
         extra_root: Path,
         limit_per_task: Optional[int],
         source_name: str,
+        limit_scope: str = "per_task",
     ) -> None:
+        if limit_scope not in {"per_task", "total"}:
+            raise ValueError("limit_scope must be one of: per_task, total")
         files: List[Path] = []
         source_location = str(extra_root)
 
@@ -277,7 +293,10 @@ class ARCContextFlowDataset(Dataset):
         rng = random.Random(42)
         added_queries = 0
         added_per_task: Dict[str, int] = {}
+        stop_loading = False
         for file_path in files:
+            if stop_loading:
+                break
             with file_path.open("r") as fh:
                 payload = json.load(fh)
 
@@ -290,10 +309,16 @@ class ARCContextFlowDataset(Dataset):
                     continue
 
                 if limit_per_task is not None:
-                    rng.shuffle(valid_examples)
-                    remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    if limit_scope == "per_task":
+                        remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    else:
+                        remaining = limit_per_task - added_queries
                     if remaining <= 0:
+                        if limit_scope == "total":
+                            stop_loading = True
+                            break
                         continue
+                    rng.shuffle(valid_examples)
                     valid_examples = valid_examples[:remaining]
 
                 if task_name not in self._tasks:
@@ -320,7 +345,8 @@ class ARCContextFlowDataset(Dataset):
                     )
                     added_queries += 1
 
-        print(f"Added {added_queries} {source_name} train queries from {source_location}.")
+        limit_desc = "all" if limit_per_task is None else f"{limit_per_task} ({limit_scope})"
+        print(f"Added {added_queries} {source_name} train queries from {source_location} [limit={limit_desc}].")
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         record = self._query_records[idx]
@@ -418,7 +444,7 @@ def build_flow_context_dataloaders(
     root = Path(args.data_root)
     train_translation_aug = bool(getattr(args, "flow_train_translation_aug", False))
     train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", False))
-    extra_specs: List[Tuple[Path, Optional[int], str]] = []
+    extra_specs: List[Tuple[Path, Optional[int], str, str]] = []
     if bool(getattr(args, "include_rearc", False)):
         rearc_limit = int(getattr(args, "rearc_limit", -1))
         extra_specs.append(
@@ -426,6 +452,7 @@ def build_flow_context_dataloaders(
                 Path(getattr(args, "rearc_path", "raw_data/re_arc")),
                 rearc_limit if rearc_limit >= 0 else None,
                 "RE-ARC",
+                "per_task",
             )
         )
     if bool(getattr(args, "include_barc", False)):
@@ -435,6 +462,7 @@ def build_flow_context_dataloaders(
                 Path(getattr(args, "barc_path", "raw_data/BARC")),
                 barc_limit if barc_limit >= 0 else None,
                 "BARC",
+                "total",
             )
         )
     train_dataset = ARCContextFlowDataset(
