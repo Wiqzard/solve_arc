@@ -9,6 +9,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, DefaultDict, Dict, Iterable, List, Optional
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - depends on local env
+    def tqdm(iterable, *args, **kwargs):  # type: ignore
+        return iterable
+
 
 TASK_ID_KEYS = (
     "task_id",
@@ -275,7 +281,7 @@ def _collect_from_local(
     )
     if not files:
         raise RuntimeError(f"No .json/.jsonl files found under {input_root}")
-    for file_path in files:
+    for file_path in tqdm(files, desc="BARC local files", total=len(files)):
         _collect_from_json_file(file_path, task_examples)
 
 
@@ -292,7 +298,9 @@ def _collect_from_hf(
         raise RuntimeError("`datasets` is required for --hf-dataset. Install dependencies first.") from exc
 
     dataset = load_dataset(dataset_id, name=config, split=split)
-    for row_idx, row in enumerate(dataset):
+    for row_idx, row in enumerate(
+        tqdm(dataset, desc=f"BARC HF rows ({dataset_id}:{split})", total=len(dataset))
+    ):
         source_name = _normalize_task_name(f"{dataset_id}_{split}_{row_idx:08d}", "hf_task")
         _collect_task_examples(row, source_name=source_name, task_examples=task_examples)
 
@@ -341,7 +349,8 @@ def main() -> None:
 
     written_tasks = 0
     written_examples = 0
-    for task_name in sorted(task_examples.keys()):
+    sorted_task_names = sorted(task_examples.keys())
+    for task_name in tqdm(sorted_task_names, desc="BARC task files", total=len(sorted_task_names)):
         deduped = _dedupe_examples(task_examples[task_name])
         if max_per_task is not None and len(deduped) > max_per_task:
             rng.shuffle(deduped)
