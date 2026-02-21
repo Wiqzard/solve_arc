@@ -2,15 +2,14 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <entity/project/sweep_id> [num_agents]"
+  echo "Usage: $0 <entity/project/sweep_id>"
   exit 1
 fi
 
 SWEEP_ID="$1"
-NUM_AGENTS="${2:-${NUM_AGENTS:-1}}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::pydantic.warnings.UnsupportedFieldAttributeWarning}"
 
-for ((i=0; i<NUM_AGENTS; i++)); do
-  CUDA_VISIBLE_DEVICES="${i}" wandb agent "${SWEEP_ID}" &
-done
-
-wait
+# Each sweep run uses torch.distributed.run with NPROC_PER_NODE GPUs.
+# Run a single agent per node to avoid GPU oversubscription.
+wandb agent "${SWEEP_ID}"

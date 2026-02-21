@@ -28,7 +28,13 @@ parameters:
 command:
   - ${env}
   - ${interpreter}
+  - -m
+  - torch.distributed.run
+  - --standalone
+  - --nproc_per_node
+  - "8"
   - ${program}
+  - --ddp
   - --data-root
   - raw_data/ARC-AGI
   - --train-split

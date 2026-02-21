@@ -416,8 +416,12 @@ wandb agent <entity>/<project>/<sweep_id>
 
 Run multiple agents across GPUs:
 ```bash
-script/run_wandb_sweep_agents.sh <entity>/<project>/<sweep_id> 8
+script/run_wandb_sweep_agents.sh <entity>/<project>/<sweep_id>
 ```
+
+Note:
+- The sweep template launches each trial with DDP (`torch.distributed.run`) on `8` GPUs and passes `--ddp`.
+- Therefore, run one W&B agent per node for this sweep template.
 
 ### Important hyperparameters
 

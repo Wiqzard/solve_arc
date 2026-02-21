@@ -107,6 +107,17 @@ def maybe_compile_model(
         return model
 
 
+def parse_optional_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ARC frame-context ViT from scratch with flow matching.")
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
@@ -137,7 +148,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rope-3d",
-        action="store_true",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_optional_bool,
         help="Enable 3D RoPE (frame,y,x) on attention q/k.",
     )
     parser.add_argument(
