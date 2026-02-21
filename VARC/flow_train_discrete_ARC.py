@@ -150,6 +150,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=8)
     parser.add_argument("--log-every-steps", type=int, default=50)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable detailed training prints in addition to tqdm bars.",
+    )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--lr-scheduler", type=str, default="cosine", choices=("cosine", "none"))
@@ -847,7 +853,7 @@ def train(args: argparse.Namespace) -> None:
     )
     max_frames = 2 * args.num_demos + 2
     context_length = 2 * args.num_demos * (args.image_size * args.image_size)
-    if is_main:
+    if is_main and args.verbose:
         print(f"Discrete flow context tokens (demo-only): {context_length}")
         print(f"Full sequence tokens with query pair: {max_frames * (args.image_size * args.image_size)}")
         print(f"Train episodes: {len(train_dataset)}")
@@ -905,7 +911,7 @@ def train(args: argparse.Namespace) -> None:
     global_step = 0
     eval_round = 0
     eval_on_steps = args.eval_every_steps > 0
-    if is_main and eval_on_steps:
+    if is_main and eval_on_steps and args.verbose:
         print(f"Step-based eval enabled: evaluating every {args.eval_every_steps} steps.")
     for epoch in range(1, args.epochs + 1):
         if train_sampler is not None:
@@ -995,10 +1001,11 @@ def train(args: argparse.Namespace) -> None:
                         f"elapsed={elapsed:.1f}s",
                     ]
                 )
-                if hasattr(train_iterator, "write"):
-                    train_iterator.write(log_line)
-                else:
-                    print(log_line)
+                if args.verbose:
+                    if hasattr(train_iterator, "write"):
+                        train_iterator.write(log_line)
+                    else:
+                        print(log_line)
                 if wandb_run is not None:
                     wandb_run.log(
                         {
@@ -1077,18 +1084,19 @@ def train(args: argparse.Namespace) -> None:
                     autocast_enabled=bf16_autocast,
                 )
                 if is_main:
-                    print(
-                        " | ".join(
-                            [
-                                "eval(trigger=steps)",
-                                f"epoch={epoch}",
-                                f"step={global_step}",
-                                f"loss={eval_loss:.6f}",
-                                f"sample_acc={eval_metrics['sample_acc']:.4f}",
-                                f"task_acc={eval_metrics['task_acc']:.4f}",
-                            ]
+                    if args.verbose:
+                        print(
+                            " | ".join(
+                                [
+                                    "eval(trigger=steps)",
+                                    f"epoch={epoch}",
+                                    f"step={global_step}",
+                                    f"loss={eval_loss:.6f}",
+                                    f"sample_acc={eval_metrics['sample_acc']:.4f}",
+                                    f"task_acc={eval_metrics['task_acc']:.4f}",
+                                ]
+                            )
                         )
-                    )
                     if wandb_run is not None:
                         wandb_run.log(
                             {
@@ -1221,19 +1229,20 @@ def train(args: argparse.Namespace) -> None:
                     wandb_run.log({"eval/num_visualized": len(viz_images)}, step=global_step)
 
         if is_main:
-            print(
-                " | ".join(
-                    [
-                        f"epoch={log_data['epoch']}",
-                        f"loss={log_data['train_loss']:.6f}",
-                        f"time={log_data['epoch_time']:.1f}s",
-                        f"lr={log_data['lr']:.6f}",
-                        f"eval_loss={log_data.get('eval_loss', float('nan')):.6f}",
-                        f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
-                        f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
-                    ]
+            if args.verbose:
+                print(
+                    " | ".join(
+                        [
+                            f"epoch={log_data['epoch']}",
+                            f"loss={log_data['train_loss']:.6f}",
+                            f"time={log_data['epoch_time']:.1f}s",
+                            f"lr={log_data['lr']:.6f}",
+                            f"eval_loss={log_data.get('eval_loss', float('nan')):.6f}",
+                            f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
+                            f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
+                        ]
+                    )
                 )
-            )
 
             if wandb_run is not None:
                 wandb_payload = dict(log_data)
