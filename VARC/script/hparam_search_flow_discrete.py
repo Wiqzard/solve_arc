@@ -15,10 +15,10 @@ from typing import Any, Dict, List
 
 DEFAULT_SEARCH_SPACE: Dict[str, List[Any]] = {
     "learning-rate": [3e-4, 1e-4],
-    "num-heads": [8, 12, 16],
+    "discrete-rate": [3.0, 5.0, 7.0],
     "rope-3d": [False, True],
     "rope-base": [256.0, 2048.0],
-    "discrete-rate": [3.0, 5.0, 7.0],
+    "num-heads": [8, 12, 16],
     "depth": [6, 10, 14, 20],
     "embed-dim": [384, 512, 768, 1024],
 }

@@ -12,8 +12,10 @@ dataset_args=(
   --eval-split "evaluation"
   --include-rearc
   --rearc-path "raw_data/re_arc"
+  #--rearc-limit -1
   --include-barc
   --barc-path "raw_data/BARC"
+  --barc-limit 400000 #-1
   --num-demos 3
   --image-size 32
   --num-colors 12
@@ -59,7 +61,7 @@ log_args=(
   --wandb-project "VisionARC"
   --wandb-num-vis-samples 8
   --wandb-vis-scale 8
-  --wandb-train-vis-every-steps 500
+  --wandb-train-vis-every-steps "${EVAL_EVERY_STEPS}"
   --wandb-train-vis-samples 2
   --wandb-run-name "flow-context-vit-discrete-ddp"
 )
