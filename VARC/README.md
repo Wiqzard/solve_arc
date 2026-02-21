@@ -226,9 +226,9 @@ Training objective:
 - Path: `x_t = (1 - t_f) * x_0 + t_f * eps`
 - Target velocity: `v* = eps - x_0`
 - Default loss applies to all frames; pass `--loss-on-target-only` to train only on the final solution frame.
-- Train data augmentation is on by default in this flow pipeline:
-  - random translation + random resolution scaling per `(input, output)` pair
-  - disable with `--no-flow-train-translation-aug --no-flow-train-resolution-aug`
+- Train data augmentation is off by default in this flow pipeline.
+  - enable random translation + random resolution scaling per `(input, output)` pair with:
+  - `--flow-train-translation-aug --flow-train-resolution-aug`
 
 Evaluation:
 - Keep demo frames and query input clean

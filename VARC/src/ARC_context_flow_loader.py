@@ -416,8 +416,8 @@ def build_flow_context_dataloaders(
     Optional[DistributedSampler],
 ]:
     root = Path(args.data_root)
-    train_translation_aug = bool(getattr(args, "flow_train_translation_aug", True))
-    train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", True))
+    train_translation_aug = bool(getattr(args, "flow_train_translation_aug", False))
+    train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", False))
     extra_specs: List[Tuple[Path, Optional[int], str]] = []
     if bool(getattr(args, "include_rearc", False)):
         rearc_limit = int(getattr(args, "rearc_limit", -1))

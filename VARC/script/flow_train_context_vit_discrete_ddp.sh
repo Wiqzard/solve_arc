@@ -3,12 +3,6 @@ set -euo pipefail
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-500}"
-COMPILE_MODE="${COMPILE_MODE:-reduce-overhead}"
-NO_COMPILE="${NO_COMPILE:-0}"
-COMPILE_ARGS=(--compile-mode "${COMPILE_MODE}")
-if [[ "${NO_COMPILE}" == "1" ]]; then
-  COMPILE_ARGS=(--no-compile)
-fi
 
 torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_ARC.py \
   --ddp \
@@ -24,7 +18,6 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_A
   --num-heads 8 \
   --mlp-ratio 4.0 \
   --dropout 0.0 \
-  --no-framewise-causal-attention \
   --attention-backend "auto" \
   --batch-size 4 \
   --eval-batch-size 8 \
@@ -32,7 +25,6 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_A
   --eval-every-steps "${EVAL_EVERY_STEPS}" \
   --epochs 100 \
   --learning-rate 3e-4 \
-  "${COMPILE_ARGS[@]}" \
   --lr-scheduler "cosine" \
   --weight-decay 0 \
   --bf16-autocast \

@@ -82,9 +82,7 @@ def maybe_compile_model(
     *,
     is_main: bool,
 ) -> torch.nn.Module:
-    if args.no_compile:
-        if is_main:
-            print("torch.compile disabled via --no-compile.")
+    if not args.compile:
         return model
     if not hasattr(torch, "compile"):
         if is_main:
@@ -117,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument(
         "--framewise-causal-attention",
-        action=argparse.BooleanOptionalAction,
+        action="store_true",
         default=False,
         help="Enable framewise causal attention (frame f attends only to frames <= f).",
     )
@@ -140,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile optimization.")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile optimization.")
     parser.add_argument(
         "--compile-mode",
         type=str,
@@ -188,14 +186,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bf16-autocast", action="store_true", help="Enable bfloat16 autocast on CUDA.")
     parser.add_argument(
         "--flow-train-translation-aug",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
         help="Enable random translation augmentation for flow train episodes.",
     )
     parser.add_argument(
         "--flow-train-resolution-aug",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
         help="Enable random resolution scaling augmentation for flow train episodes.",
     )
 
