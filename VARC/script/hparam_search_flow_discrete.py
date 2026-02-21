@@ -108,6 +108,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--extra-args", type=str, default="", help="Extra args appended verbatim to every run.")
     parser.add_argument("--python-bin", type=str, default=sys.executable)
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=int(os.environ.get("NPROC_PER_NODE", "8")),
+        help="GPUs per trial for DDP (torch.distributed.run).",
+    )
     return parser.parse_args()
 
 
@@ -279,7 +285,13 @@ def main() -> None:
 
         cmd: List[str] = [
             args.python_bin,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node",
+            str(args.nproc_per_node),
             "flow_train_discrete_ARC.py",
+            "--ddp",
             "--data-root",
             args.data_root,
             "--train-split",
