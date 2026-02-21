@@ -3,12 +3,27 @@ method: bayes
 metric:
   goal: minimize
   name: eval/loss
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 3
+  strict: true
 
 parameters:
   learning-rate:
-    values: [0.0001, 0.0002, 0.0003]
+    values: [0.0003, 0.0001]
+  num-heads:
+    values: [8, 12, 16]
+  rope-3d:
+    values: [false, true]
+  rope-base:
+    values: [256.0, 2048.0]
   discrete-rate:
     values: [3.0, 5.0, 7.0]
+  depth:
+    values: [6, 10, 14, 20]
+  embed-dim:
+    values: [384, 512, 768, 1024]
 
 command:
   - ${env}
@@ -23,47 +38,51 @@ command:
   - --num-demos
   - "3"
   - --image-size
-  - "30"
+  - "32"
   - --num-colors
   - "12"
-  - --embed-dim
-  - "512"
-  - --depth
-  - "14"
-  - --num-heads
-  - "8"
   - --mlp-ratio
   - "4.0"
   - --dropout
   - "0.0"
+  - --flow-train-resolution-aug
+  - --flow-train-translation-aug
   - --batch-size
   - "4"
   - --eval-batch-size
   - "8"
+  - --num-workers
+  - "8"
   - --log-every-steps
   - "5"
   - --eval-every-steps
-  - "500"
+  - "200"
   - --epochs
   - "20"
+  - --min-learning-rate
+  - "1e-6"
   - --weight-decay
   - "0"
   - --lr-scheduler
   - cosine
-  - --reverse-sampler
-  - sample
   - --attention-backend
   - auto
+  - --reverse-sampler
+  - sample
   - --framewise-causal-attention
+  - --sample-steps
+  - "40"
   - --include-rearc
   - --include-barc
   - --barc-limit
   - "400000"
   - --bf16-autocast
   - --compile
-  - --sample-steps
-  - "20"
   - --use-wandb
   - --wandb-project
   - VisionARC
+  - --wandb-num-vis-samples
+  - "8"
+  - --wandb-vis-scale
+  - "8"
   - ${args}

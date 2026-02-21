@@ -403,10 +403,20 @@ You can also use existing packages/services:
 - Optuna
 - Ray Tune
 
+The provided W&B sweep template uses:
+- Bayesian search
+- Hyperband early termination (ASHA-style multi-fidelity pruning)
+- `eval/loss` minimization objective
+
 W&B sweep example:
 ```bash
 wandb sweep script/wandb_sweep_flow_discrete.yaml
 wandb agent <entity>/<project>/<sweep_id>
+```
+
+Run multiple agents across GPUs:
+```bash
+script/run_wandb_sweep_agents.sh <entity>/<project>/<sweep_id> 8
 ```
 
 ### Important hyperparameters
