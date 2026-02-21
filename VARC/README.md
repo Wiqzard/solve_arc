@@ -104,6 +104,31 @@ bash script/sanity_ARC1.sh
 bash script/sanity_ARC2.sh
 ```
 
+### Optional: Prepare BARC as extra training data
+If you want to add BARC to training, convert it into VARC's expected extra-data layout:
+`raw_data/BARC/tasks/<task_id>.json`, where each file is a list of `{input, output}` pairs.
+
+From a local BARC dump (directory or json/jsonl file):
+```
+python script/prepare_barc.py \
+  --input-root /path/to/BARC_source \
+  --output-root raw_data/BARC \
+  --overwrite
+```
+
+Directly from a Hugging Face dataset:
+```
+python script/prepare_barc.py \
+  --hf-dataset <org_or_user>/<dataset_name> \
+  --hf-split train \
+  --output-root raw_data/BARC \
+  --overwrite
+```
+
+Then enable it in training:
+- Offline / RL: add `--include-barc --barc-path raw_data/BARC`
+- Flow: add `--include-barc --barc-path raw_data/BARC`
+
 ### 2. Offline training
 Train VARC-ViT-18M (5h 12m 42s on 8 x H200):
 ```

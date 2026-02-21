@@ -117,6 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Maximum number of Re-ARC examples to include per task (use -1 for all examples).",
     )
+    parser.add_argument(
+        "--include-barc",
+        action="store_true",
+        help="Add tasks from the BARC dataset to the training set.",
+    )
+    parser.add_argument(
+        "--barc-path",
+        type=str,
+        default="raw_data/BARC",
+        help="Path to the BARC dataset root.",
+    )
+    parser.add_argument(
+        "--barc-limit",
+        type=int,
+        default=-1,
+        help="Maximum number of BARC examples to include per task (use -1 for all examples).",
+    )
     
     parser.add_argument(
         "--distributed",

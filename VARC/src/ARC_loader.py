@@ -97,6 +97,7 @@ class ARCDataset(Dataset):
         task_lookup: Optional[Dict[str, int]] = None,
         extra_train_roots: Optional[Iterable[Path]] = None,
         extra_train_limit: Optional[int] = None,
+        extra_train_specs: Optional[Iterable[Tuple[Path, Optional[int], str]]] = None,
     ) -> None:
         if subset not in {"train", "test"}:
             raise ValueError("subset must be 'train' or 'test'.")
@@ -107,6 +108,7 @@ class ARCDataset(Dataset):
 
         self.samples: List[Dict[str, torch.Tensor]] = []
         self.task_lookup: Dict[str, int] = dict(task_lookup) if task_lookup is not None else {}
+        self._next_example_index_by_task: Dict[str, int] = {}
 
         split_dir = self.root / "data" / split
         files = sorted(split_dir.glob("*.json"))
@@ -148,10 +150,23 @@ class ARCDataset(Dataset):
                     {"example": example, "task_index": task_index,
                         "task_name": task_name, "example_index": example_index}
                 )
+                self._next_example_index_by_task[task_name] = example_index + 1
         # Load RE-ARC extra training data if specified
-        if subset == "train" and extra_train_roots:
-            for extra_root in extra_train_roots:
-                self._load_extra_training_data_rearc(Path(extra_root), extra_train_limit)
+        if subset == "train":
+            if extra_train_roots:
+                for extra_root in extra_train_roots:
+                    self._load_extra_training_data(
+                        extra_root=Path(extra_root),
+                        limit_per_task=extra_train_limit,
+                        source_name="extra",
+                    )
+            if extra_train_specs:
+                for extra_root, per_task_limit, source_name in extra_train_specs:
+                    self._load_extra_training_data(
+                        extra_root=Path(extra_root),
+                        limit_per_task=per_task_limit,
+                        source_name=source_name,
+                    )
 
         if not self.samples:
             raise RuntimeError(
@@ -194,6 +209,21 @@ class ARCDataset(Dataset):
         task_index = len(self.task_lookup)
         self.task_lookup[task_name] = task_index
         return task_index
+
+    def _is_valid_example(self, example: Any) -> bool:
+        if not isinstance(example, dict):
+            return False
+        if "input" not in example or "output" not in example:
+            return False
+        if not isinstance(example["input"], list) or not example["input"]:
+            return False
+        if not isinstance(example["output"], list) or not example["output"]:
+            return False
+        max_cur_y = len(example["input"])
+        max_cur_x = len(example["input"][0]) if max_cur_y > 0 else 0
+        max_cur_y = max(max_cur_y, len(example["output"]))
+        max_cur_x = max(max_cur_x, len(example["output"][0]) if len(example["output"]) > 0 else 0)
+        return max_cur_y <= MAX_SIZE and max_cur_x <= MAX_SIZE
 
     def process_per_example(self, example, task_index, task_name, example_index, rng, if_translation=True):
         """
@@ -273,41 +303,116 @@ class ARCDataset(Dataset):
             }
 
 
-    def _load_extra_training_data_rearc(self, extra_root: Path, limit_per_task: Optional[int]) -> None:
-        tasks_dir = extra_root / "tasks"
-        if not tasks_dir.exists():
-            raise RuntimeError(f"Expected 'tasks' directory under {extra_root} for extra training data.")
+    def _iter_task_examples_from_payload(
+        self,
+        payload: Any,
+        *,
+        default_task_name: str,
+    ) -> List[Tuple[str, List[Dict[str, Any]]]]:
+        task_sets: List[Tuple[str, List[Dict[str, Any]]]] = []
+        if isinstance(payload, list):
+            task_sets.append((default_task_name, payload))
+            return task_sets
+        if not isinstance(payload, dict):
+            return task_sets
 
-        files = sorted(tasks_dir.glob("*.json"))
+        if isinstance(payload.get("train"), list):
+            task_sets.append((default_task_name, payload["train"]))
+            return task_sets
+
+        if isinstance(payload.get("tasks"), dict):
+            for task_name, task_payload in payload["tasks"].items():
+                if isinstance(task_payload, list):
+                    task_sets.append((str(task_name), task_payload))
+                elif isinstance(task_payload, dict):
+                    examples = task_payload.get("train")
+                    if not isinstance(examples, list):
+                        examples = task_payload.get("examples")
+                    if isinstance(examples, list):
+                        task_sets.append((str(task_name), examples))
+            if task_sets:
+                return task_sets
+
+        for task_name, task_payload in payload.items():
+            if isinstance(task_payload, list):
+                task_sets.append((str(task_name), task_payload))
+                continue
+            if isinstance(task_payload, dict):
+                examples = task_payload.get("train")
+                if not isinstance(examples, list):
+                    examples = task_payload.get("examples")
+                if isinstance(examples, list):
+                    task_sets.append((str(task_name), examples))
+        return task_sets
+
+    def _load_extra_training_data(
+        self,
+        *,
+        extra_root: Path,
+        limit_per_task: Optional[int],
+        source_name: str,
+    ) -> None:
+        files: List[Path] = []
+        source_location = str(extra_root)
+        if extra_root.is_file() and extra_root.suffix == ".json":
+            files = [extra_root]
+        else:
+            candidates = [
+                extra_root / "tasks",
+                extra_root / "training",
+                extra_root / "data" / "training",
+                extra_root,
+            ]
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_dir():
+                    candidate_files = sorted(candidate.glob("*.json"))
+                    if candidate_files:
+                        files = candidate_files
+                        source_location = str(candidate)
+                        break
+
+        if not files:
+            print(f"No {source_name} task files found under {extra_root}, skipping.")
+            return
+
         rng = random.Random(42)
+        added_samples = 0
+        added_per_task: Dict[str, int] = {}
         for file_path in files:
-            base_name = file_path.stem
-            task_name = base_name
-            task_index = self._get_or_add_task_index(task_name)
             with file_path.open("r") as fh:
-                examples = json.load(fh)
-
-            if limit_per_task is not None:
-                rng.shuffle(examples)
-            else:
-                limit_per_task = len(examples)
-            cur_samples = []       
-            for example_index, example in enumerate(examples):
-                max_cur_y = len(example["input"])
-                max_cur_x = len(example["input"][0])
-                if "output" in example:
-                    max_cur_y = max(max_cur_y, len(example["output"]))
-                    max_cur_x = max(max_cur_x, len(example["output"][0]))
-                if max_cur_y > MAX_SIZE or max_cur_x > MAX_SIZE:
+                payload = json.load(fh)
+            task_sets = self._iter_task_examples_from_payload(
+                payload,
+                default_task_name=file_path.stem,
+            )
+            for task_name, examples in task_sets:
+                valid_examples = [ex for ex in examples if self._is_valid_example(ex)]
+                if not valid_examples:
                     continue
-                cur_samples.append(
-                    {"example": example, "task_index": task_index, 
-                     "task_name": task_name, "example_index": example_index}
-                )
-                if len(cur_samples) >= limit_per_task:
-                    break
-            self.samples.extend(cur_samples)
-        print(f"Data loaded from RE-ARC with {len(self.samples)} total samples.")
+
+                if limit_per_task is not None:
+                    rng.shuffle(valid_examples)
+                    remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    if remaining <= 0:
+                        continue
+                    valid_examples = valid_examples[:remaining]
+
+                task_index = self._get_or_add_task_index(task_name)
+                next_example_index = self._next_example_index_by_task.get(task_name, 0)
+                for offset, example in enumerate(valid_examples):
+                    self.samples.append(
+                        {
+                            "example": example,
+                            "task_index": task_index,
+                            "task_name": task_name,
+                            "example_index": next_example_index + offset,
+                        }
+                    )
+                self._next_example_index_by_task[task_name] = next_example_index + len(valid_examples)
+                added_per_task[task_name] = added_per_task.get(task_name, 0) + len(valid_examples)
+                added_samples += len(valid_examples)
+
+        print(f"Added {added_samples} {source_name} samples from {source_location}.")
         return None
 
     
@@ -319,12 +424,13 @@ def build_dataloaders(
     world_size: int = 1,
 ):
     root = Path(args.data_root)
-    extra_roots: Optional[List[Path]] = None
-    extra_limit: Optional[int] = None
+    extra_specs: List[Tuple[Path, Optional[int], str]] = []
     if getattr(args, "include_rearc", False):
-        extra_roots = [Path(args.rearc_path)]
-        if args.rearc_limit >= 0:
-            extra_limit = args.rearc_limit
+        rearc_limit = args.rearc_limit if args.rearc_limit >= 0 else None
+        extra_specs.append((Path(args.rearc_path), rearc_limit, "RE-ARC"))
+    if getattr(args, "include_barc", False):
+        barc_limit = args.barc_limit if args.barc_limit >= 0 else None
+        extra_specs.append((Path(args.barc_path), barc_limit, "BARC"))
 
 
     train_split = getattr(args, "train_split", "training")
@@ -333,8 +439,7 @@ def build_dataloaders(
         train_split,
         subset="train",
         max_size=args.image_size,
-        extra_train_roots=extra_roots,
-        extra_train_limit=extra_limit,
+        extra_train_specs=extra_specs or None,
     )
     train_sampler = None
     if distributed:

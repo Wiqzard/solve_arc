@@ -133,6 +133,23 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Maximum RE-ARC examples per task (-1 means all).",
     )
+    parser.add_argument(
+        "--include-barc",
+        action="store_true",
+        help="Add tasks from the BARC dataset to the flow training set.",
+    )
+    parser.add_argument(
+        "--barc-path",
+        type=str,
+        default="raw_data/BARC",
+        help="Path to BARC dataset root.",
+    )
+    parser.add_argument(
+        "--barc-limit",
+        type=int,
+        default=-1,
+        help="Maximum BARC examples per task (-1 means all).",
+    )
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")

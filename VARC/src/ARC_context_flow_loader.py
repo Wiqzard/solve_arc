@@ -35,6 +35,7 @@ class ARCContextFlowDataset(Dataset):
         resolution_augmentation: bool = True,
         extra_train_roots: Optional[Iterable[Path]] = None,
         extra_train_limit: Optional[int] = None,
+        extra_train_specs: Optional[Iterable[Tuple[Path, Optional[int], str]]] = None,
     ) -> None:
         if mode not in {"train", "eval"}:
             raise ValueError("mode must be 'train' or 'eval'.")
@@ -87,9 +88,21 @@ class ARCContextFlowDataset(Dataset):
                     }
                 )
 
-        if mode == "train" and extra_train_roots:
-            for extra_root in extra_train_roots:
-                self._load_extra_training_data_rearc(Path(extra_root), extra_train_limit)
+        if mode == "train":
+            if extra_train_roots:
+                for extra_root in extra_train_roots:
+                    self._load_extra_training_data(
+                        extra_root=Path(extra_root),
+                        limit_per_task=extra_train_limit,
+                        source_name="extra",
+                    )
+            if extra_train_specs:
+                for extra_root, per_task_limit, source_name in extra_train_specs:
+                    self._load_extra_training_data(
+                        extra_root=Path(extra_root),
+                        limit_per_task=per_task_limit,
+                        source_name=source_name,
+                    )
 
         if not self._query_records:
             raise RuntimeError(f"No valid episodes found for split={split} mode={mode}.")
@@ -185,56 +198,129 @@ class ARCContextFlowDataset(Dataset):
             return rng.sample(candidates, k=self.num_demos)
         return [rng.choice(candidates) for _ in range(self.num_demos)]
 
-    def _load_extra_training_data_rearc(self, extra_root: Path, limit_per_task: Optional[int]) -> None:
-        tasks_dir = extra_root / "tasks"
-        if not tasks_dir.exists():
-            tasks_dir = extra_root / "training"
-        files = sorted(tasks_dir.glob("*.json"))
+    def _iter_task_examples_from_payload(
+        self,
+        payload: Any,
+        *,
+        default_task_name: str,
+    ) -> List[Tuple[str, List[Dict[str, Any]]]]:
+        task_sets: List[Tuple[str, List[Dict[str, Any]]]] = []
+        if isinstance(payload, list):
+            task_sets.append((default_task_name, payload))
+            return task_sets
+        if not isinstance(payload, dict):
+            return task_sets
+
+        # Standard ARC task file: {"train": [...], "test": [...]}
+        if isinstance(payload.get("train"), list):
+            task_sets.append((default_task_name, payload["train"]))
+            return task_sets
+
+        # Container format: {"tasks": {"id": {"train":[...]}, ...}}
+        if isinstance(payload.get("tasks"), dict):
+            for task_name, task_payload in payload["tasks"].items():
+                if isinstance(task_payload, list):
+                    task_sets.append((str(task_name), task_payload))
+                elif isinstance(task_payload, dict):
+                    examples = task_payload.get("train")
+                    if not isinstance(examples, list):
+                        examples = task_payload.get("examples")
+                    if isinstance(examples, list):
+                        task_sets.append((str(task_name), examples))
+            if task_sets:
+                return task_sets
+
+        # Flat mapping format: {"id": {"train":[...]}, "id2": [...], ...}
+        for task_name, task_payload in payload.items():
+            if isinstance(task_payload, list):
+                task_sets.append((str(task_name), task_payload))
+                continue
+            if isinstance(task_payload, dict):
+                examples = task_payload.get("train")
+                if not isinstance(examples, list):
+                    examples = task_payload.get("examples")
+                if isinstance(examples, list):
+                    task_sets.append((str(task_name), examples))
+        return task_sets
+
+    def _load_extra_training_data(
+        self,
+        *,
+        extra_root: Path,
+        limit_per_task: Optional[int],
+        source_name: str,
+    ) -> None:
+        files: List[Path] = []
+        source_location = str(extra_root)
+
+        if extra_root.is_file() and extra_root.suffix == ".json":
+            files = [extra_root]
+        else:
+            candidates = [
+                extra_root / "tasks",
+                extra_root / "training",
+                extra_root / "data" / "training",
+                extra_root,
+            ]
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_dir():
+                    candidate_files = sorted(candidate.glob("*.json"))
+                    if candidate_files:
+                        files = candidate_files
+                        source_location = str(candidate)
+                        break
+
         if not files:
-            print(f"No RE-ARC task files found under {tasks_dir}, skipping.")
+            print(f"No {source_name} task files found under {extra_root}, skipping.")
             return
 
         rng = random.Random(42)
         added_queries = 0
+        added_per_task: Dict[str, int] = {}
         for file_path in files:
-            task_name = file_path.stem
             with file_path.open("r") as fh:
-                examples = json.load(fh)
-            if not isinstance(examples, list):
-                continue
+                payload = json.load(fh)
 
-            valid_examples = [ex for ex in examples if self._is_valid_example(ex)]
-            if not valid_examples:
-                continue
+            for task_name, examples in self._iter_task_examples_from_payload(
+                payload,
+                default_task_name=file_path.stem,
+            ):
+                valid_examples = [ex for ex in examples if self._is_valid_example(ex)]
+                if not valid_examples:
+                    continue
 
-            if limit_per_task is not None:
-                rng.shuffle(valid_examples)
-                valid_examples = valid_examples[:limit_per_task]
+                if limit_per_task is not None:
+                    rng.shuffle(valid_examples)
+                    remaining = limit_per_task - added_per_task.get(task_name, 0)
+                    if remaining <= 0:
+                        continue
+                    valid_examples = valid_examples[:remaining]
 
-            if task_name not in self._tasks:
-                self._tasks[task_name] = {"train": [], "test": []}
-                self._train_valid_indices[task_name] = []
-            elif "train" not in self._tasks[task_name]:
-                self._tasks[task_name]["train"] = []
+                if task_name not in self._tasks:
+                    self._tasks[task_name] = {"train": [], "test": []}
+                    self._train_valid_indices[task_name] = []
+                elif "train" not in self._tasks[task_name]:
+                    self._tasks[task_name]["train"] = []
 
-            train_examples = self._tasks[task_name]["train"]
-            start_index = len(train_examples)
-            train_examples.extend(valid_examples)
+                train_examples = self._tasks[task_name]["train"]
+                start_index = len(train_examples)
+                train_examples.extend(valid_examples)
 
-            new_indices = list(range(start_index, start_index + len(valid_examples)))
-            self._train_valid_indices[task_name].extend(new_indices)
+                new_indices = list(range(start_index, start_index + len(valid_examples)))
+                self._train_valid_indices[task_name].extend(new_indices)
+                added_per_task[task_name] = added_per_task.get(task_name, 0) + len(valid_examples)
 
-            for query_index in new_indices:
-                self._query_records.append(
-                    {
-                        "task_name": task_name,
-                        "query_source": "train",
-                        "query_index": query_index,
-                    }
-                )
-                added_queries += 1
+                for query_index in new_indices:
+                    self._query_records.append(
+                        {
+                            "task_name": task_name,
+                            "query_source": "train",
+                            "query_index": query_index,
+                        }
+                    )
+                    added_queries += 1
 
-        print(f"Added {added_queries} RE-ARC train queries from {tasks_dir}.")
+        print(f"Added {added_queries} {source_name} train queries from {source_location}.")
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         record = self._query_records[idx]
@@ -332,13 +418,25 @@ def build_flow_context_dataloaders(
     root = Path(args.data_root)
     train_translation_aug = bool(getattr(args, "flow_train_translation_aug", True))
     train_resolution_aug = bool(getattr(args, "flow_train_resolution_aug", True))
-    extra_roots: Optional[List[Path]] = None
-    extra_limit: Optional[int] = None
+    extra_specs: List[Tuple[Path, Optional[int], str]] = []
     if bool(getattr(args, "include_rearc", False)):
-        extra_roots = [Path(getattr(args, "rearc_path", "raw_data/re_arc"))]
         rearc_limit = int(getattr(args, "rearc_limit", -1))
-        if rearc_limit >= 0:
-            extra_limit = rearc_limit
+        extra_specs.append(
+            (
+                Path(getattr(args, "rearc_path", "raw_data/re_arc")),
+                rearc_limit if rearc_limit >= 0 else None,
+                "RE-ARC",
+            )
+        )
+    if bool(getattr(args, "include_barc", False)):
+        barc_limit = int(getattr(args, "barc_limit", -1))
+        extra_specs.append(
+            (
+                Path(getattr(args, "barc_path", "raw_data/BARC")),
+                barc_limit if barc_limit >= 0 else None,
+                "BARC",
+            )
+        )
     train_dataset = ARCContextFlowDataset(
         root=root,
         split=args.train_split,
@@ -349,8 +447,7 @@ def build_flow_context_dataloaders(
         seed=args.seed,
         translation_augmentation=train_translation_aug,
         resolution_augmentation=train_resolution_aug,
-        extra_train_roots=extra_roots,
-        extra_train_limit=extra_limit,
+        extra_train_specs=extra_specs or None,
     )
     train_sampler: Optional[DistributedSampler] = None
     if distributed:
