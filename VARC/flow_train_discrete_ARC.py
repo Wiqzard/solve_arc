@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.modules.loss import _Loss
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from flow_matching.loss import MixturePathGeneralizedKL
@@ -269,6 +270,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Apply discrete flow-matching loss only on the final solution frame.",
+    )
+    parser.add_argument(
+        "--loss-function",
+        type=str,
+        default="generalized_kl",
+        choices=("cross_entropy", "generalized_kl"),
+        help="Discrete flow-matching loss function (Meta-style selector).",
     )
     parser.add_argument(
         "--discrete-rate",
@@ -616,6 +624,16 @@ def build_discrete_path(
     return MixtureDiscreteProbPath(scheduler=scheduler)
 
 
+def get_loss_function(loss_function: str, path: Optional[MixtureDiscreteProbPath] = None) -> _Loss:
+    if loss_function == "cross_entropy":
+        return torch.nn.CrossEntropyLoss(reduction="none")
+    if loss_function == "generalized_kl":
+        if path is None:
+            raise ValueError("path must be provided for generalized_kl loss")
+        return MixturePathGeneralizedKL(path=path, reduction="none")
+    raise ValueError(f"{loss_function} is not supported")
+
+
 def sample_xt_from_qt(
     clean_tokens: torch.Tensor,
     frame_valid_mask: torch.Tensor,
@@ -651,17 +669,23 @@ def discrete_flow_matching_loss(
     frame_times: torch.Tensor,
     target_frame_index: torch.Tensor,
     target_valid_mask: torch.Tensor,
-    generalized_kl: MixturePathGeneralizedKL,
+    loss_function: _Loss,
     target_only: bool,
 ) -> torch.Tensor:
-    # Use Meta-style generalized KL class on flattened per-frame sequences.
+    # Use Meta-style loss classes on flattened per-frame sequences.
     batch_size, frame_count, height, width, num_colors = logits.shape
     seq_len = height * width
     logits_flat = logits.reshape(batch_size * frame_count, seq_len, num_colors)
     x1_flat = clean_tokens.reshape(batch_size * frame_count, seq_len)
-    xt_flat = x_t_tokens.reshape(batch_size * frame_count, seq_len)
-    t_flat = frame_times.reshape(batch_size * frame_count)
-    loss_map = generalized_kl(logits_flat, x1_flat, xt_flat, t_flat).reshape(batch_size, frame_count, height, width)
+    if isinstance(loss_function, MixturePathGeneralizedKL):
+        xt_flat = x_t_tokens.reshape(batch_size * frame_count, seq_len)
+        t_flat = frame_times.reshape(batch_size * frame_count)
+        loss_map = loss_function(logits_flat, x1_flat, xt_flat, t_flat).reshape(batch_size, frame_count, height, width)
+    elif isinstance(loss_function, torch.nn.CrossEntropyLoss):
+        ce_map = loss_function(logits_flat.permute(0, 2, 1), x1_flat)
+        loss_map = ce_map.reshape(batch_size, frame_count, height, width)
+    else:
+        raise TypeError(f"Unsupported loss module type: {type(loss_function)}")
 
     if target_only:
         batch_idx = torch.arange(batch_size, device=logits.device)
@@ -889,7 +913,7 @@ def evaluate_discrete_flow_loss(
     num_colors: int,
     time_discretization_steps: int,
     path: MixtureDiscreteProbPath,
-    generalized_kl: MixturePathGeneralizedKL,
+    loss_function: _Loss,
     target_only: bool,
     show_progress: bool = False,
     autocast_enabled: bool = False,
@@ -932,7 +956,7 @@ def evaluate_discrete_flow_loss(
             frame_times=frame_times,
             target_frame_index=target_frame_index,
             target_valid_mask=target_valid_mask,
-            generalized_kl=generalized_kl,
+            loss_function=loss_function,
             target_only=target_only,
         )
 
@@ -1025,7 +1049,7 @@ def train(args: argparse.Namespace) -> None:
         discrete_vp_beta_min=args.discrete_vp_beta_min,
         discrete_vp_beta_max=args.discrete_vp_beta_max,
     )
-    generalized_kl = MixturePathGeneralizedKL(path=path, reduction="none")
+    loss_function = get_loss_function(args.loss_function, path=path)
     if is_main and args.verbose:
         if args.discrete_scheduler == "exponential":
             scheduler_desc = f"beta={args.discrete_rate}"
@@ -1036,6 +1060,7 @@ def train(args: argparse.Namespace) -> None:
         else:
             scheduler_desc = ""
         print(f"Discrete scheduler: {args.discrete_scheduler}" + (f" ({scheduler_desc})" if scheduler_desc else ""))
+        print(f"Discrete loss: {args.loss_function}")
         print(f"Train/eval-loss time discretization steps: {args.train_time_discretization_steps}")
 
     optimizer = torch.optim.AdamW(
@@ -1119,7 +1144,7 @@ def train(args: argparse.Namespace) -> None:
                 frame_times=frame_times,
                 target_frame_index=target_frame_index,
                 target_valid_mask=target_valid_mask,
-                generalized_kl=generalized_kl,
+                loss_function=loss_function,
                 target_only=args.loss_on_target_only,
             )
 
@@ -1243,7 +1268,7 @@ def train(args: argparse.Namespace) -> None:
                     num_colors=args.num_colors,
                     time_discretization_steps=args.train_time_discretization_steps,
                     path=path,
-                    generalized_kl=generalized_kl,
+                    loss_function=loss_function,
                     target_only=args.loss_on_target_only,
                     show_progress=False,
                     autocast_enabled=bf16_autocast,
@@ -1355,7 +1380,7 @@ def train(args: argparse.Namespace) -> None:
                 num_colors=args.num_colors,
                 time_discretization_steps=args.train_time_discretization_steps,
                 path=path,
-                generalized_kl=generalized_kl,
+                loss_function=loss_function,
                 target_only=args.loss_on_target_only,
                 show_progress=False,
                 autocast_enabled=bf16_autocast,
