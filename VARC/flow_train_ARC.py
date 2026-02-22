@@ -382,9 +382,16 @@ def evaluate_last_frame_accuracy(
     autocast_enabled: bool = False,
 ) -> Dict[str, float]:
     if loader is None:
-        return {"sample_acc": 0.0, "task_acc": 0.0, "samples": 0.0}
+        return {
+            "sample_acc": 0.0,
+            "sample_acc_at_50": 0.0,
+            "sample_acc_at_80": 0.0,
+            "sample_acc_at_90": 0.0,
+            "task_acc": 0.0,
+            "samples": 0.0,
+        }
 
-    episode_results: Dict[str, tuple[str, bool]] = {}
+    episode_results: Dict[str, tuple[str, bool, bool, bool, bool]] = {}
 
     eval_iterator = tqdm(loader, desc="eval", total=len(loader), leave=False, disable=not show_progress)
     for batch in eval_iterator:
@@ -408,18 +415,28 @@ def evaluate_last_frame_accuracy(
 
         valid = target_valid_mask.bool()
         exact = (((prediction == target_output) | ~valid).view(prediction.size(0), -1)).all(dim=1)
+        match_ratio = (
+            ((prediction == target_output) & valid).view(prediction.size(0), -1).float().sum(dim=1)
+            / valid.view(prediction.size(0), -1).float().sum(dim=1).clamp_min(1.0)
+        )
+        at_50 = match_ratio >= 0.50
+        at_80 = match_ratio >= 0.80
+        at_90 = match_ratio >= 0.90
 
         for i in range(prediction.size(0)):
             task_name = task_names[i]
             is_correct = bool(exact[i].item())
+            is_at_50 = bool(at_50[i].item())
+            is_at_80 = bool(at_80[i].item())
+            is_at_90 = bool(at_90[i].item())
             query_index = int(query_indices[i].item())
             episode_key = f"{task_name}::{query_index}"
-            episode_results[episode_key] = (task_name, is_correct)
+            episode_results[episode_key] = (task_name, is_correct, is_at_50, is_at_80, is_at_90)
 
     if dist.is_available() and dist.is_initialized():
-        gathered: list[Optional[Dict[str, tuple[str, bool]]]] = [None for _ in range(dist.get_world_size())]
+        gathered: list[Optional[Dict[str, tuple[str, bool, bool, bool, bool]]]] = [None for _ in range(dist.get_world_size())]
         dist.all_gather_object(gathered, episode_results)
-        merged_results: Dict[str, tuple[str, bool]] = {}
+        merged_results: Dict[str, tuple[str, bool, bool, bool, bool]] = {}
         for shard in gathered:
             if shard is not None:
                 merged_results.update(shard)
@@ -427,17 +444,30 @@ def evaluate_last_frame_accuracy(
         merged_results = episode_results
 
     sample_total = len(merged_results)
-    sample_correct = sum(1 for _, is_correct in merged_results.values() if is_correct)
+    sample_correct = sum(1 for _, is_correct, _, _, _ in merged_results.values() if is_correct)
+    sample_correct_at_50 = sum(1 for _, _, is_at_50, _, _ in merged_results.values() if is_at_50)
+    sample_correct_at_80 = sum(1 for _, _, _, is_at_80, _ in merged_results.values() if is_at_80)
+    sample_correct_at_90 = sum(1 for _, _, _, _, is_at_90 in merged_results.values() if is_at_90)
     sample_acc = sample_correct / max(sample_total, 1)
+    sample_acc_at_50 = sample_correct_at_50 / max(sample_total, 1)
+    sample_acc_at_80 = sample_correct_at_80 / max(sample_total, 1)
+    sample_acc_at_90 = sample_correct_at_90 / max(sample_total, 1)
     task_acc = 0.0
     task_total: Dict[str, int] = {}
     task_correct: Dict[str, int] = {}
-    for task_name, is_correct in merged_results.values():
+    for task_name, is_correct, _, _, _ in merged_results.values():
         task_total[task_name] = task_total.get(task_name, 0) + 1
         task_correct[task_name] = task_correct.get(task_name, 0) + int(is_correct)
     if task_total:
         task_acc = float(np.mean([task_correct[name] / task_total[name] for name in task_total]))
-    return {"sample_acc": sample_acc, "task_acc": task_acc, "samples": float(sample_total)}
+    return {
+        "sample_acc": sample_acc,
+        "sample_acc_at_50": sample_acc_at_50,
+        "sample_acc_at_80": sample_acc_at_80,
+        "sample_acc_at_90": sample_acc_at_90,
+        "task_acc": task_acc,
+        "samples": float(sample_total),
+    }
 
 
 @torch.no_grad()
@@ -720,6 +750,9 @@ def train(args: argparse.Namespace) -> None:
                                 f"step={global_step}",
                                 f"loss={eval_loss:.6f}",
                                 f"sample_acc={eval_metrics['sample_acc']:.4f}",
+                                f"sample_acc@50={eval_metrics['sample_acc_at_50']:.4f}",
+                                f"sample_acc@80={eval_metrics['sample_acc_at_80']:.4f}",
+                                f"sample_acc@90={eval_metrics['sample_acc_at_90']:.4f}",
                                 f"task_acc={eval_metrics['task_acc']:.4f}",
                             ]
                         )
@@ -730,6 +763,9 @@ def train(args: argparse.Namespace) -> None:
                                 "eval_loss": eval_loss,
                                 "eval/loss": eval_loss,
                                 "eval/sample_acc": eval_metrics["sample_acc"],
+                                "eval/sample_acc_at_50": eval_metrics["sample_acc_at_50"],
+                                "eval/sample_acc_at_80": eval_metrics["sample_acc_at_80"],
+                                "eval/sample_acc_at_90": eval_metrics["sample_acc_at_90"],
                                 "eval/task_acc": eval_metrics["task_acc"],
                                 "eval/trigger_step": global_step,
                                 "eval/trigger_epoch": epoch,
@@ -795,6 +831,9 @@ def train(args: argparse.Namespace) -> None:
                     {
                         "eval_loss": eval_loss,
                         "eval_sample_acc": eval_metrics["sample_acc"],
+                        "eval_sample_acc_at_50": eval_metrics["sample_acc_at_50"],
+                        "eval_sample_acc_at_80": eval_metrics["sample_acc_at_80"],
+                        "eval_sample_acc_at_90": eval_metrics["sample_acc_at_90"],
                         "eval_task_acc": eval_metrics["task_acc"],
                     }
                 )
@@ -821,6 +860,9 @@ def train(args: argparse.Namespace) -> None:
                         f"lr={log_data['lr']:.6f}",
                         f"eval_loss={log_data.get('eval_loss', float('nan')):.6f}",
                         f"sample_acc={log_data.get('eval_sample_acc', float('nan')):.4f}",
+                        f"sample_acc@50={log_data.get('eval_sample_acc_at_50', float('nan')):.4f}",
+                        f"sample_acc@80={log_data.get('eval_sample_acc_at_80', float('nan')):.4f}",
+                        f"sample_acc@90={log_data.get('eval_sample_acc_at_90', float('nan')):.4f}",
                         f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
                     ]
                 )
@@ -830,6 +872,11 @@ def train(args: argparse.Namespace) -> None:
                 wandb_payload = dict(log_data)
                 if "eval_loss" in log_data:
                     wandb_payload["eval/loss"] = log_data["eval_loss"]
+                    wandb_payload["eval/sample_acc"] = log_data.get("eval_sample_acc", float("nan"))
+                    wandb_payload["eval/sample_acc_at_50"] = log_data.get("eval_sample_acc_at_50", float("nan"))
+                    wandb_payload["eval/sample_acc_at_80"] = log_data.get("eval_sample_acc_at_80", float("nan"))
+                    wandb_payload["eval/sample_acc_at_90"] = log_data.get("eval_sample_acc_at_90", float("nan"))
+                    wandb_payload["eval/task_acc"] = log_data.get("eval_task_acc", float("nan"))
                 wandb_run.log(wandb_payload, step=global_step)
 
             save_checkpoint(
