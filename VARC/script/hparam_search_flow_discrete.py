@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
     parser.add_argument("--train-split", type=str, default="training")
     parser.add_argument("--eval-split", type=str, default="evaluation")
-    parser.add_argument("--num-demos", type=int, default=3)
+    parser.add_argument("--max-demos", "--num-demos", dest="max_demos", type=int, default=3)
     parser.add_argument("--image-size", type=int, default=32)
     parser.add_argument("--num-colors", type=int, default=12)
     parser.add_argument("--embed-dim", type=int, default=512)
@@ -105,6 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--framewise-causal-attention", action="store_true", default=True)
     parser.add_argument("--flow-train-translation-aug", action="store_true", default=True)
     parser.add_argument("--flow-train-resolution-aug", action="store_true", default=True)
+    parser.add_argument("--nested-dropout", action="store_true", default=False)
 
     parser.add_argument("--extra-args", type=str, default="", help="Extra args appended verbatim to every run.")
     parser.add_argument("--python-bin", type=str, default=sys.executable)
@@ -298,8 +299,8 @@ def main() -> None:
             args.train_split,
             "--eval-split",
             args.eval_split,
-            "--num-demos",
-            str(args.num_demos),
+            "--max-demos",
+            str(args.max_demos),
             "--image-size",
             str(args.image_size),
             "--num-colors",
@@ -363,6 +364,7 @@ def main() -> None:
         _extend_bool_flag(cmd, args.rope_3d, "--rope-3d")
         _extend_bool_flag(cmd, args.flow_train_translation_aug, "--flow-train-translation-aug")
         _extend_bool_flag(cmd, args.flow_train_resolution_aug, "--flow-train-resolution-aug")
+        _extend_bool_flag(cmd, args.nested_dropout, "--nested-dropout")
         _extend_bool_flag(cmd, args.use_wandb, "--use-wandb")
         if args.use_wandb:
             cmd.extend(

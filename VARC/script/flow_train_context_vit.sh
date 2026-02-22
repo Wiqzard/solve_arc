@@ -1,10 +1,16 @@
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-0}"
+NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
+
+nested_dropout_args=()
+if [[ "${NESTED_DROPOUT}" == "1" ]]; then
+  nested_dropout_args+=(--nested-dropout)
+fi
 
 python flow_train_ARC.py \
   --data-root "raw_data/ARC-AGI" \
   --train-split "training" \
   --eval-split "evaluation" \
-  --num-demos 3 \
+  --max-demos 3 \
   --image-size 30 \
   --num-colors 12 \
   --embed-dim 512 \
@@ -27,4 +33,5 @@ python flow_train_ARC.py \
   --best-save-path "saves/flow_context_vit/checkpoint_best.pt" \
   --use-wandb \
   --wandb-project "VisionARC" \
-  --wandb-run-name "flow-context-vit"
+  --wandb-run-name "flow-context-vit" \
+  "${nested_dropout_args[@]}"

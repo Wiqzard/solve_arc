@@ -3,13 +3,19 @@ set -euo pipefail
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-0}"
+NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
+
+nested_dropout_args=()
+if [[ "${NESTED_DROPOUT}" == "1" ]]; then
+  nested_dropout_args+=(--nested-dropout)
+fi
 
 torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_ARC.py \
   --ddp \
   --data-root "raw_data/ARC-AGI" \
   --train-split "training" \
   --eval-split "evaluation" \
-  --num-demos 3 \
+  --max-demos 3 \
   --image-size 30 \
   --num-colors 12 \
   --embed-dim 512 \
@@ -32,4 +38,5 @@ torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_ARC.py \
   --best-save-path "saves/flow_context_vit/checkpoint_best.pt" \
   --use-wandb \
   --wandb-project "VisionARC" \
-  --wandb-run-name "flow-context-vit-ddp"
+  --wandb-run-name "flow-context-vit-ddp" \
+  "${nested_dropout_args[@]}"

@@ -1,25 +1,37 @@
 program: flow_train_discrete_ARC.py
-method: random
+method: random #bayes
 metric:
-  goal: maximize
-  name: eval/sample_acc_at_95
+  goal: minimize
+  name: eval/loss
+#early_terminate:
+#  type: hyperband
+#  min_iter: 3
+#  eta: 3
+#  strict: true
 
 parameters:
-  discrete-scheduler:
-    values: [exponential, condot, polynomial, vp, linear_vp, cosine]
-  # Used by exponential scheduler.
-  discrete-rate:
-    values: [1.0, 3.0, 5.0, 7.0]
-  # Used by polynomial scheduler.
-  discrete-poly-n:
-    values: [1.5, 2.0, 3.0, 4.0]
-  # Used by vp scheduler.
-  discrete-vp-beta-min:
-    values: [0.01, 0.1]
-  discrete-vp-beta-max:
-    values: [10.0, 20.0]
-  loss-function:
-    values: [cross_entropy, generalized_kl]
+  #learning-rate:
+  #  values: [0.0003, 0.0001]
+  rope-3d:
+    values: [false, true]
+  #image-size:
+  #  values: [32, 48]
+   # values: [32]
+    #values: [32, 64]
+  depth:
+    values: [4, 8, 16, 24, 32]
+  embed-dim:
+    values: [384, 512, 768, 1024]
+  num-heads:
+    values: [8, 12, 16, 32]
+  nested-dropout:
+    values: [false, true]
+  #batch-size:
+  #  values: [4, 8, 16, 32]
+  #rope-base:
+  #  values: [256.0, 2048.0]
+  #framewise-causal-attention:
+  #  values: [false, true]
 
 command:
   - ${env}
@@ -37,7 +49,7 @@ command:
   - training
   - --eval-split
   - evaluation
-  - --num-demos
+  - --max-demos
   - "3"
   - --image-size
   - "32"
@@ -72,6 +84,12 @@ command:
   - "3e-4"
   - --lr-scheduler
   - cosine
+  - --discrete-scheduler
+  - "cosine"
+  - --discrete-rate
+  - "5.0"
+  - --loss-function
+  - "cross_entropy"
   - --min-learning-rate
   - "1e-6"
   - --weight-decay
@@ -84,7 +102,7 @@ command:
   - "40"
   - --include-rearc
   - --rearc-limit
-  - "150000"
+  - "15000"
   - --include-barc
   - --barc-limit
   - "500"

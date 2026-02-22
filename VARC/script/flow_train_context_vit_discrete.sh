@@ -1,10 +1,16 @@
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-0}"
+NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
+
+nested_dropout_args=()
+if [[ "${NESTED_DROPOUT}" == "1" ]]; then
+  nested_dropout_args+=(--nested-dropout)
+fi
 
 python flow_train_discrete_ARC.py \
   --data-root "raw_data/ARC-AGI" \
   --train-split "training" \
   --eval-split "evaluation" \
-  --num-demos 3 \
+  --max-demos 3 \
   --image-size 30 \
   --num-colors 12 \
   --embed-dim 512 \
@@ -34,4 +40,5 @@ python flow_train_discrete_ARC.py \
   --wandb-num-vis-samples 8 \
   --wandb-vis-scale 8 \
   --wandb-run-name "flow-context-vit-discrete" \
-  --attention-backend "auto"
+  --attention-backend "auto" \
+  "${nested_dropout_args[@]}"

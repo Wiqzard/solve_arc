@@ -254,8 +254,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--nested-dropout",
-        action="store_true",
         default=False,
+        nargs="?",
+        const=True,
+        type=parse_optional_bool,
         help=(
             "Train-time demo dropout: sample k in [1, max_demos], keep at most k demos, "
             "and left-pad remaining demo slots."
