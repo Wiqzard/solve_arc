@@ -1071,6 +1071,7 @@ def train(args: argparse.Namespace) -> None:
         rope_3d=args.rope_3d,
         rope_base=args.rope_base,
     ).to(device)
+    model.prime_flex_attention_block_masks(frames=max_frames)
     model = maybe_compile_model(model, args, is_main=is_main)
     if distributed:
         model = DDP(

@@ -9,7 +9,7 @@ from torch import nn
 
 try:
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
+    flex_attention = torch.compile(flex_attention)
     FLEX_ATTENTION_AVAILABLE = True
 except ImportError:
     create_block_mask = None
@@ -435,6 +435,30 @@ class ARCFlowViT(nn.Module):
         nn.init.trunc_normal_(self.spatial_embed, std=0.02)
         nn.init.trunc_normal_(self.frame_embed.weight, std=0.02)
         nn.init.zeros_(self.head.bias)
+
+    @torch.no_grad()
+    def prime_flex_attention_block_masks(self, *, frames: Optional[int] = None) -> None:
+        """
+        Prebuild flex block masks eagerly so compiled forward reuses cached masks.
+        This avoids creating block masks inside torch.compile/CUDAGraph runs.
+        """
+        if not self.use_custom_attention_blocks:
+            return
+        if create_block_mask is None:
+            return
+        frames = self.max_frames if frames is None else int(frames)
+        if frames <= 0 or frames > self.max_frames:
+            raise ValueError(f"frames must be in [1, {self.max_frames}], got {frames}")
+        device = self.frame_embed.weight.device
+        frame_index_per_token = self.token_frame_index[: frames * self.spatial_tokens].to(device=device)
+        probe_x = torch.empty(1, 1, self.embed_dim, device=device)
+        for layer in self.encoder_layers:
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            backend = attn._resolve_backend(probe_x)
+            if backend == "flex":
+                attn._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
 
     def forward(
         self,
