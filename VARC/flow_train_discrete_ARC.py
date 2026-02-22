@@ -317,6 +317,12 @@ def parse_args() -> argparse.Namespace:
         help="If > 0, run evaluation every N optimizer steps (disables epoch-based eval).",
     )
     parser.add_argument("--sample-steps", type=int, default=40, help="Discrete Euler steps for last-frame generation.")
+    parser.add_argument(
+        "--train-time-discretization-steps",
+        type=int,
+        default=1000,
+        help="Number of discrete time bins for sampling training/eval-loss times t in [0, 1).",
+    )
 
     parser.add_argument("--save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_last.pt")
     parser.add_argument("--best-save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_best.pt")
@@ -577,8 +583,12 @@ def sample_frame_times(
     batch_size: int,
     frames: int,
     device: torch.device,
+    discretization_steps: int,
 ) -> torch.Tensor:
-    return torch.rand(batch_size, frames, device=device)
+    if discretization_steps <= 1:
+        return torch.zeros(batch_size, frames, device=device)
+    indices = torch.randint(0, discretization_steps, (batch_size, frames), device=device)
+    return indices.float() / float(discretization_steps)
 
 
 def build_discrete_path(
@@ -871,6 +881,7 @@ def evaluate_discrete_flow_loss(
     *,
     device: torch.device,
     num_colors: int,
+    time_discretization_steps: int,
     path: MixtureDiscreteProbPath,
     generalized_kl: MixturePathGeneralizedKL,
     target_only: bool,
@@ -894,6 +905,7 @@ def evaluate_discrete_flow_loss(
             batch_size=batch_size,
             frames=frame_count,
             device=device,
+            discretization_steps=time_discretization_steps,
         )
         x_t_tokens = sample_xt_from_qt(
             frames,
@@ -1018,6 +1030,7 @@ def train(args: argparse.Namespace) -> None:
         else:
             scheduler_desc = ""
         print(f"Discrete scheduler: {args.discrete_scheduler}" + (f" ({scheduler_desc})" if scheduler_desc else ""))
+        print(f"Train/eval-loss time discretization steps: {args.train_time_discretization_steps}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1078,6 +1091,7 @@ def train(args: argparse.Namespace) -> None:
                 batch_size=batch_size,
                 frames=frame_count,
                 device=device,
+                discretization_steps=args.train_time_discretization_steps,
             )
 
             x_t_tokens = sample_xt_from_qt(
@@ -1221,6 +1235,7 @@ def train(args: argparse.Namespace) -> None:
                     eval_loader if eval_loader is not None else train_loader,
                     device=device,
                     num_colors=args.num_colors,
+                    time_discretization_steps=args.train_time_discretization_steps,
                     path=path,
                     generalized_kl=generalized_kl,
                     target_only=args.loss_on_target_only,
@@ -1330,6 +1345,7 @@ def train(args: argparse.Namespace) -> None:
                 eval_loader if eval_loader is not None else train_loader,
                 device=device,
                 num_colors=args.num_colors,
+                time_discretization_steps=args.train_time_discretization_steps,
                 path=path,
                 generalized_kl=generalized_kl,
                 target_only=args.loss_on_target_only,
