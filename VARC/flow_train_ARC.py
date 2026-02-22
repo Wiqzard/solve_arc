@@ -382,11 +382,12 @@ def evaluate_last_frame_accuracy(
             "sample_acc_at_50": 0.0,
             "sample_acc_at_80": 0.0,
             "sample_acc_at_90": 0.0,
+            "sample_acc_at_95": 0.0,
             "task_acc": 0.0,
             "samples": 0.0,
         }
 
-    episode_results: Dict[str, tuple[str, bool, bool, bool, bool]] = {}
+    episode_results: Dict[str, tuple[str, bool, bool, bool, bool, bool]] = {}
 
     eval_iterator = tqdm(loader, desc="eval", total=len(loader), leave=False, disable=not show_progress)
     for batch in eval_iterator:
@@ -417,6 +418,7 @@ def evaluate_last_frame_accuracy(
         at_50 = match_ratio >= 0.50
         at_80 = match_ratio >= 0.80
         at_90 = match_ratio >= 0.90
+        at_95 = match_ratio >= 0.95
 
         for i in range(prediction.size(0)):
             task_name = task_names[i]
@@ -424,14 +426,15 @@ def evaluate_last_frame_accuracy(
             is_at_50 = bool(at_50[i].item())
             is_at_80 = bool(at_80[i].item())
             is_at_90 = bool(at_90[i].item())
+            is_at_95 = bool(at_95[i].item())
             query_index = int(query_indices[i].item())
             episode_key = f"{task_name}::{query_index}"
-            episode_results[episode_key] = (task_name, is_correct, is_at_50, is_at_80, is_at_90)
+            episode_results[episode_key] = (task_name, is_correct, is_at_50, is_at_80, is_at_90, is_at_95)
 
     if dist.is_available() and dist.is_initialized():
-        gathered: list[Optional[Dict[str, tuple[str, bool, bool, bool, bool]]]] = [None for _ in range(dist.get_world_size())]
+        gathered: list[Optional[Dict[str, tuple[str, bool, bool, bool, bool, bool]]]] = [None for _ in range(dist.get_world_size())]
         dist.all_gather_object(gathered, episode_results)
-        merged_results: Dict[str, tuple[str, bool, bool, bool, bool]] = {}
+        merged_results: Dict[str, tuple[str, bool, bool, bool, bool, bool]] = {}
         for shard in gathered:
             if shard is not None:
                 merged_results.update(shard)
@@ -439,18 +442,20 @@ def evaluate_last_frame_accuracy(
         merged_results = episode_results
 
     sample_total = len(merged_results)
-    sample_correct = sum(1 for _, is_correct, _, _, _ in merged_results.values() if is_correct)
-    sample_correct_at_50 = sum(1 for _, _, is_at_50, _, _ in merged_results.values() if is_at_50)
-    sample_correct_at_80 = sum(1 for _, _, _, is_at_80, _ in merged_results.values() if is_at_80)
-    sample_correct_at_90 = sum(1 for _, _, _, _, is_at_90 in merged_results.values() if is_at_90)
+    sample_correct = sum(1 for _, is_correct, _, _, _, _ in merged_results.values() if is_correct)
+    sample_correct_at_50 = sum(1 for _, _, is_at_50, _, _, _ in merged_results.values() if is_at_50)
+    sample_correct_at_80 = sum(1 for _, _, _, is_at_80, _, _ in merged_results.values() if is_at_80)
+    sample_correct_at_90 = sum(1 for _, _, _, _, is_at_90, _ in merged_results.values() if is_at_90)
+    sample_correct_at_95 = sum(1 for _, _, _, _, _, is_at_95 in merged_results.values() if is_at_95)
     sample_acc = sample_correct / max(sample_total, 1)
     sample_acc_at_50 = sample_correct_at_50 / max(sample_total, 1)
     sample_acc_at_80 = sample_correct_at_80 / max(sample_total, 1)
     sample_acc_at_90 = sample_correct_at_90 / max(sample_total, 1)
+    sample_acc_at_95 = sample_correct_at_95 / max(sample_total, 1)
     task_acc = 0.0
     task_total: Dict[str, int] = {}
     task_correct: Dict[str, int] = {}
-    for task_name, is_correct, _, _, _ in merged_results.values():
+    for task_name, is_correct, _, _, _, _ in merged_results.values():
         task_total[task_name] = task_total.get(task_name, 0) + 1
         task_correct[task_name] = task_correct.get(task_name, 0) + int(is_correct)
     if task_total:
@@ -460,6 +465,7 @@ def evaluate_last_frame_accuracy(
         "sample_acc_at_50": sample_acc_at_50,
         "sample_acc_at_80": sample_acc_at_80,
         "sample_acc_at_90": sample_acc_at_90,
+        "sample_acc_at_95": sample_acc_at_95,
         "task_acc": task_acc,
         "samples": float(sample_total),
     }
@@ -740,6 +746,7 @@ def train(args: argparse.Namespace) -> None:
                                 f"sample_acc@50={eval_metrics['sample_acc_at_50']:.4f}",
                                 f"sample_acc@80={eval_metrics['sample_acc_at_80']:.4f}",
                                 f"sample_acc@90={eval_metrics['sample_acc_at_90']:.4f}",
+                                f"sample_acc@95={eval_metrics['sample_acc_at_95']:.4f}",
                                 f"task_acc={eval_metrics['task_acc']:.4f}",
                             ]
                         )
@@ -753,6 +760,7 @@ def train(args: argparse.Namespace) -> None:
                                 "eval/sample_acc_at_50": eval_metrics["sample_acc_at_50"],
                                 "eval/sample_acc_at_80": eval_metrics["sample_acc_at_80"],
                                 "eval/sample_acc_at_90": eval_metrics["sample_acc_at_90"],
+                                "eval/sample_acc_at_95": eval_metrics["sample_acc_at_95"],
                                 "eval/task_acc": eval_metrics["task_acc"],
                                 "eval/trigger_step": global_step,
                                 "eval/trigger_epoch": epoch,
@@ -819,6 +827,7 @@ def train(args: argparse.Namespace) -> None:
                         "eval_sample_acc_at_50": eval_metrics["sample_acc_at_50"],
                         "eval_sample_acc_at_80": eval_metrics["sample_acc_at_80"],
                         "eval_sample_acc_at_90": eval_metrics["sample_acc_at_90"],
+                        "eval_sample_acc_at_95": eval_metrics["sample_acc_at_95"],
                         "eval_task_acc": eval_metrics["task_acc"],
                     }
                 )
@@ -848,6 +857,7 @@ def train(args: argparse.Namespace) -> None:
                         f"sample_acc@50={log_data.get('eval_sample_acc_at_50', float('nan')):.4f}",
                         f"sample_acc@80={log_data.get('eval_sample_acc_at_80', float('nan')):.4f}",
                         f"sample_acc@90={log_data.get('eval_sample_acc_at_90', float('nan')):.4f}",
+                        f"sample_acc@95={log_data.get('eval_sample_acc_at_95', float('nan')):.4f}",
                         f"task_acc={log_data.get('eval_task_acc', float('nan')):.4f}",
                     ]
                 )
@@ -861,6 +871,7 @@ def train(args: argparse.Namespace) -> None:
                     wandb_payload["eval/sample_acc_at_50"] = log_data.get("eval_sample_acc_at_50", float("nan"))
                     wandb_payload["eval/sample_acc_at_80"] = log_data.get("eval_sample_acc_at_80", float("nan"))
                     wandb_payload["eval/sample_acc_at_90"] = log_data.get("eval_sample_acc_at_90", float("nan"))
+                    wandb_payload["eval/sample_acc_at_95"] = log_data.get("eval_sample_acc_at_95", float("nan"))
                     wandb_payload["eval/task_acc"] = log_data.get("eval_task_acc", float("nan"))
                 wandb_run.log(wandb_payload, step=global_step)
 
