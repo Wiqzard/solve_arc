@@ -34,6 +34,7 @@ model_args=(
   --framewise-causal-attention
   --rope-3d
   --rope-base 256.0
+  --mask-pad-attention
 )
 
 training_args=(
