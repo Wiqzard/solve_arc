@@ -1,0 +1,103 @@
+program: flow_train_discrete_ARC.py
+method: random
+metric:
+  goal: minimize
+  name: eval/loss
+
+parameters:
+  discrete-scheduler:
+    values: [exponential, condot, polynomial, vp, linear_vp, cosine]
+
+  # Used by exponential scheduler.
+  discrete-rate:
+    values: [1.0, 3.0, 5.0, 7.0]
+
+  # Used by polynomial scheduler.
+  discrete-poly-n:
+    values: [1.5, 2.0, 3.0, 4.0]
+
+  # Used by vp scheduler.
+  discrete-vp-beta-min:
+    values: [0.01, 0.1]
+  discrete-vp-beta-max:
+    values: [10.0, 20.0]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - torch.distributed.run
+  - --standalone
+  - --nproc_per_node
+  - "8"
+  - ${program}
+  - --ddp
+  - --data-root
+  - raw_data/ARC-AGI
+  - --train-split
+  - training
+  - --eval-split
+  - evaluation
+  - --num-demos
+  - "3"
+  - --image-size
+  - "32"
+  - --num-colors
+  - "12"
+  - --embed-dim
+  - "512"
+  - --depth
+  - "10"
+  - --num-heads
+  - "8"
+  - --mlp-ratio
+  - "4.0"
+  - --dropout
+  - "0.0"
+  - --framewise-causal-attention
+  - --attention-backend
+  - auto
+  - --batch-size
+  - "4"
+  - --eval-batch-size
+  - "4"
+  - --num-workers
+  - "8"
+  - --log-every-steps
+  - "5"
+  - --eval-every-steps
+  - "500"
+  - --epochs
+  - "1"
+  - --learning-rate
+  - "3e-4"
+  - --lr-scheduler
+  - cosine
+  - --min-learning-rate
+  - "1e-6"
+  - --weight-decay
+  - "0"
+  - --train-time-discretization-steps
+  - "1000"
+  - --reverse-sampler
+  - sample
+  - --sample-steps
+  - "40"
+  - --include-rearc
+  - --rearc-limit
+  - "150000"
+  - --include-barc
+  - --barc-limit
+  - "50000"
+  - --flow-train-resolution-aug
+  - --flow-train-translation-aug
+  - --bf16-autocast
+  - --compile
+  - --use-wandb
+  - --wandb-project
+  - VisionARC
+  - --wandb-num-vis-samples
+  - "8"
+  - --wandb-vis-scale
+  - "8"
+  - ${args}
