@@ -39,6 +39,8 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class FramewiseSelfAttention(nn.Module):
+    _GLOBAL_FLEX_BLOCK_MASK_CACHE: Dict[tuple[int, str, bool], Any] = {}
+
     def __init__(
         self,
         *,
@@ -76,8 +78,6 @@ class FramewiseSelfAttention(nn.Module):
         self.qkv = nn.Linear(embed_dim, embed_dim * 3)
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_dropout = nn.Dropout(dropout)
-
-        self._flex_block_mask_cache: Dict[tuple[int, str, bool], Any] = {}
         self._warned_flex_fallback = False
 
     def _resolve_backend(self, x: torch.Tensor) -> str:
@@ -127,7 +127,7 @@ class FramewiseSelfAttention(nn.Module):
             raise RuntimeError("torch flex_attention is unavailable.")
         seq_len = int(frame_index_per_token.numel())
         cache_key = (seq_len, str(frame_index_per_token.device), self.causal)
-        cached = self._flex_block_mask_cache.get(cache_key)
+        cached = FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
@@ -152,7 +152,7 @@ class FramewiseSelfAttention(nn.Module):
             KV_LEN=seq_len,
             device=frame_index_per_token.device,
         )
-        self._flex_block_mask_cache[cache_key] = block_mask
+        FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE[cache_key] = block_mask
         return block_mask
 
     def _rotary_cos_sin(self, position_ids: torch.Tensor, *, half_dim: int, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
