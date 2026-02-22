@@ -1202,6 +1202,8 @@ def train(args: argparse.Namespace) -> None:
                 step_avg_loss = step_loss_accum / max(step_loss_count, 1)
                 elapsed = time.time() - epoch_start
                 valid_mask_bool = frame_valid_mask.bool()
+                valid_token_ratio = valid_mask_bool.float().mean()
+                pad_token_ratio = 1.0 - valid_token_ratio
                 changed_mask = (x_t_tokens != frames) & valid_mask_bool
                 noise_all = changed_mask.float().sum() / valid_mask_bool.float().sum().clamp_min(1.0)
                 batch_ids = torch.arange(batch_size, device=device)
@@ -1218,6 +1220,7 @@ def train(args: argparse.Namespace) -> None:
                         f"batch={batch_idx}/{total_batches}",
                         f"step_loss={loss_value:.6f}",
                         f"step_avg_loss={step_avg_loss:.6f}",
+                        f"pad_ratio={float(pad_token_ratio):.3f}",
                         f"noise_all={float(noise_all):.3f}",
                         f"noise_ctx={float(noise_context):.3f}",
                         f"noise_tgt={float(noise_target):.3f}",
@@ -1236,6 +1239,8 @@ def train(args: argparse.Namespace) -> None:
                             "train/step_avg_loss": step_avg_loss,
                             "train/lr": optimizer.param_groups[0]["lr"],
                             "train/epoch": epoch,
+                            "train/pad_token_ratio": float(pad_token_ratio),
+                            "train/valid_token_ratio": float(valid_token_ratio),
                             "train/noise_fraction_all": float(noise_all),
                             "train/noise_fraction_context": float(noise_context),
                             "train/noise_fraction_target": float(noise_target),
