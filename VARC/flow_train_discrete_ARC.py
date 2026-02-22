@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import os
 import random
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,14 @@ from flow_matching.solver import MixtureDiscreteEulerSolver
 from flow_matching.utils import ModelWrapper
 from src.ARC_FlowViT import ARCFlowViT, ARCFlowViTLooped
 from src.ARC_context_flow_loader import build_flow_context_dataloaders
+
+# Silence noisy pydantic internals warnings frequently emitted via wandb dependency stack.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*attribute with value .* was provided to the .*Field\(\).* function, which has no effect.*",
+    module=r"pydantic\._internal\._generate_schema",
+)
+
 try:
     from tqdm.auto import tqdm
 except ImportError:
