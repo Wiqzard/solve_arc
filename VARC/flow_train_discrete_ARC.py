@@ -192,8 +192,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mask-pad-attention",
-        action="store_true",
         default=False,
+        nargs="?",
+        const=True,
+        type=parse_optional_bool,
         help="Mask padded tokens in attention. For flex-causal attention, this is combined with framewise causal masking.",
     )
     parser.add_argument(
@@ -232,7 +234,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--compile-mode",
         type=str,
-        default="reduce-overhead",
+        default="default",
         choices=("default", "reduce-overhead", "max-autotune"),
         help="torch.compile mode.",
     )
