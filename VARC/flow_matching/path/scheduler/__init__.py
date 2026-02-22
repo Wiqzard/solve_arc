@@ -1,3 +1,21 @@
-from .scheduler import CondOTScheduler, ExponentialScheduler, PolynomialConvexScheduler, SchedulerOutput
+from .scheduler import (
+    CondOTScheduler,
+    CosineScheduler,
+    ExponentialScheduler,
+    LinearVPScheduler,
+    PolynomialConvexScheduler,
+    Scheduler,
+    SchedulerOutput,
+    VPScheduler,
+)
 
-__all__ = ["SchedulerOutput", "CondOTScheduler", "PolynomialConvexScheduler", "ExponentialScheduler"]
+__all__ = [
+    "SchedulerOutput",
+    "Scheduler",
+    "CondOTScheduler",
+    "PolynomialConvexScheduler",
+    "ExponentialScheduler",
+    "VPScheduler",
+    "LinearVPScheduler",
+    "CosineScheduler",
+]
