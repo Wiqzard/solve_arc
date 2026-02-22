@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from .scheduler.scheduler import CondOTScheduler, ConvexScheduler, SchedulerOutput
+from .scheduler.scheduler import CondOTScheduler, Scheduler, SchedulerOutput
 
 
 @dataclass
@@ -17,7 +17,7 @@ class DiscretePathSample:
 class MixtureDiscreteProbPath:
     """Discrete mixture probability path used by x-prediction training."""
 
-    def __init__(self, scheduler: ConvexScheduler | None = None) -> None:
+    def __init__(self, scheduler: Scheduler | None = None) -> None:
         self.scheduler = scheduler if scheduler is not None else CondOTScheduler()
 
     def sample(self, x_0: Tensor, x_1: Tensor, t: Tensor) -> DiscretePathSample:

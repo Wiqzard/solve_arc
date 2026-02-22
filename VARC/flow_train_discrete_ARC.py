@@ -16,7 +16,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from flow_matching.loss import MixturePathGeneralizedKL
 from flow_matching.path import MixtureDiscreteProbPath
-from flow_matching.path.scheduler import ExponentialScheduler
+from flow_matching.path.scheduler import (
+    CondOTScheduler,
+    CosineScheduler,
+    ExponentialScheduler,
+    LinearVPScheduler,
+    PolynomialConvexScheduler,
+    VPScheduler,
+)
 from flow_matching.solver import MixtureDiscreteEulerSolver
 from flow_matching.utils import ModelWrapper
 from src.ARC_FlowViT import ARCFlowViT, ARCFlowViTLooped
@@ -177,7 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rope-base",
         type=float,
-        default=10000.0,
+        default=256.0,
         help="Base frequency for 3D RoPE.",
     )
 
@@ -270,6 +277,31 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="Exponential scheduler rate for alpha_t = 1 - exp(-beta*t).",
+    )
+    parser.add_argument(
+        "--discrete-scheduler",
+        type=str,
+        default="exponential",
+        choices=("exponential", "condot", "polynomial", "vp", "linear_vp", "cosine"),
+        help="Scheduler used by MixtureDiscreteProbPath during training and sampling.",
+    )
+    parser.add_argument(
+        "--discrete-poly-n",
+        type=float,
+        default=2.0,
+        help="Polynomial degree n for --discrete-scheduler polynomial.",
+    )
+    parser.add_argument(
+        "--discrete-vp-beta-min",
+        type=float,
+        default=0.1,
+        help="beta_min for --discrete-scheduler vp.",
+    )
+    parser.add_argument(
+        "--discrete-vp-beta-max",
+        type=float,
+        default=20.0,
+        help="beta_max for --discrete-scheduler vp.",
     )
     parser.add_argument(
         "--reverse-sampler",
@@ -554,8 +586,29 @@ def sample_frame_times(
     return times * (max_t - min_t) + min_t
 
 
-def build_discrete_path(beta: float) -> MixtureDiscreteProbPath:
-    return MixtureDiscreteProbPath(scheduler=ExponentialScheduler(beta=beta))
+def build_discrete_path(
+    *,
+    scheduler_name: str,
+    discrete_rate: float,
+    discrete_poly_n: float,
+    discrete_vp_beta_min: float,
+    discrete_vp_beta_max: float,
+) -> MixtureDiscreteProbPath:
+    if scheduler_name == "exponential":
+        scheduler = ExponentialScheduler(beta=discrete_rate)
+    elif scheduler_name == "condot":
+        scheduler = CondOTScheduler()
+    elif scheduler_name == "polynomial":
+        scheduler = PolynomialConvexScheduler(n=discrete_poly_n)
+    elif scheduler_name == "vp":
+        scheduler = VPScheduler(beta_min=discrete_vp_beta_min, beta_max=discrete_vp_beta_max)
+    elif scheduler_name == "linear_vp":
+        scheduler = LinearVPScheduler()
+    elif scheduler_name == "cosine":
+        scheduler = CosineScheduler()
+    else:
+        raise ValueError(f"Unsupported discrete scheduler: {scheduler_name}")
+    return MixtureDiscreteProbPath(scheduler=scheduler)
 
 
 def sample_xt_from_qt(
@@ -564,7 +617,7 @@ def sample_xt_from_qt(
     frame_times: torch.Tensor,
     *,
     num_colors: int,
-    beta: float,
+    path: MixtureDiscreteProbPath,
 ) -> torch.Tensor:
     """
     Sample x_t from a mixture discrete path:
@@ -577,7 +630,6 @@ def sample_xt_from_qt(
         device=clean_tokens.device,
         dtype=clean_tokens.dtype,
     )
-    path = build_discrete_path(beta=beta)
     x_t = path.sample(x_0=source_tokens, x_1=clean_tokens, t=frame_times).x_t
 
     # Keep padding area unchanged; those positions are always masked out of the loss.
@@ -594,20 +646,17 @@ def discrete_flow_matching_loss(
     frame_times: torch.Tensor,
     target_frame_index: torch.Tensor,
     target_valid_mask: torch.Tensor,
-    beta: float,
+    generalized_kl: MixturePathGeneralizedKL,
     target_only: bool,
 ) -> torch.Tensor:
     # Use Meta-style generalized KL class on flattened per-frame sequences.
-    path = build_discrete_path(beta=beta)
-    loss_module = MixturePathGeneralizedKL(path=path, reduction="none")
-
     batch_size, frame_count, height, width, num_colors = logits.shape
     seq_len = height * width
     logits_flat = logits.reshape(batch_size * frame_count, seq_len, num_colors)
     x1_flat = clean_tokens.reshape(batch_size * frame_count, seq_len)
     xt_flat = x_t_tokens.reshape(batch_size * frame_count, seq_len)
     t_flat = frame_times.reshape(batch_size * frame_count)
-    loss_map = loss_module(logits_flat, x1_flat, xt_flat, t_flat).reshape(batch_size, frame_count, height, width)
+    loss_map = generalized_kl(logits_flat, x1_flat, xt_flat, t_flat).reshape(batch_size, frame_count, height, width)
 
     if target_only:
         batch_idx = torch.arange(batch_size, device=logits.device)
@@ -632,7 +681,7 @@ def denoise_last_solution_frame_discrete(
     target_frame_index: torch.Tensor,
     num_colors: int,
     steps: int,
-    beta: float,
+    path: MixtureDiscreteProbPath,
     reverse_sampler: str,
     autocast_enabled: bool = False,
 ) -> torch.Tensor:
@@ -641,7 +690,6 @@ def denoise_last_solution_frame_discrete(
     device = frames.device
     batch_idx = torch.arange(batch_size, device=device)
     target_valid_mask = frame_valid_mask[batch_idx, target_frame_index].bool()
-    path = build_discrete_path(beta=beta)
     step_size = 1.0 / float(max(steps, 1))
 
     class ARCPosteriorWrapper(ModelWrapper):
@@ -710,7 +758,7 @@ def evaluate_last_frame_accuracy(
     device: torch.device,
     num_colors: int,
     sample_steps: int,
-    beta: float,
+    path: MixtureDiscreteProbPath,
     reverse_sampler: str,
     collect_examples: int = 0,
     show_progress: bool = True,
@@ -746,7 +794,7 @@ def evaluate_last_frame_accuracy(
             target_frame_index=target_frame_index,
             num_colors=num_colors,
             steps=sample_steps,
-            beta=beta,
+            path=path,
             reverse_sampler=reverse_sampler,
             autocast_enabled=autocast_enabled,
         )
@@ -830,7 +878,8 @@ def evaluate_discrete_flow_loss(
     num_colors: int,
     min_noise_level: float,
     max_noise_level: float,
-    beta: float,
+    path: MixtureDiscreteProbPath,
+    generalized_kl: MixturePathGeneralizedKL,
     target_only: bool,
     show_progress: bool = False,
     autocast_enabled: bool = False,
@@ -860,7 +909,7 @@ def evaluate_discrete_flow_loss(
             frame_valid_mask,
             frame_times,
             num_colors=num_colors,
-            beta=beta,
+            path=path,
         )
         x_t = one_hot_frames(x_t_tokens, num_colors=num_colors)
         cudagraph_step_begin_if_available()
@@ -874,7 +923,7 @@ def evaluate_discrete_flow_loss(
             frame_times=frame_times,
             target_frame_index=target_frame_index,
             target_valid_mask=target_valid_mask,
-            beta=beta,
+            generalized_kl=generalized_kl,
             target_only=target_only,
         )
 
@@ -960,6 +1009,24 @@ def train(args: argparse.Namespace) -> None:
             output_device=local_rank if device.type == "cuda" else None,
             find_unused_parameters=False,
         )
+    path = build_discrete_path(
+        scheduler_name=args.discrete_scheduler,
+        discrete_rate=args.discrete_rate,
+        discrete_poly_n=args.discrete_poly_n,
+        discrete_vp_beta_min=args.discrete_vp_beta_min,
+        discrete_vp_beta_max=args.discrete_vp_beta_max,
+    )
+    generalized_kl = MixturePathGeneralizedKL(path=path, reduction="none")
+    if is_main and args.verbose:
+        if args.discrete_scheduler == "exponential":
+            scheduler_desc = f"beta={args.discrete_rate}"
+        elif args.discrete_scheduler == "polynomial":
+            scheduler_desc = f"n={args.discrete_poly_n}"
+        elif args.discrete_scheduler == "vp":
+            scheduler_desc = f"beta_min={args.discrete_vp_beta_min}, beta_max={args.discrete_vp_beta_max}"
+        else:
+            scheduler_desc = ""
+        print(f"Discrete scheduler: {args.discrete_scheduler}" + (f" ({scheduler_desc})" if scheduler_desc else ""))
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1029,7 +1096,7 @@ def train(args: argparse.Namespace) -> None:
                 frame_valid_mask,
                 frame_times,
                 num_colors=args.num_colors,
-                beta=args.discrete_rate,
+                path=path,
             )
             x_t = one_hot_frames(x_t_tokens, num_colors=args.num_colors)
             cudagraph_step_begin_if_available()
@@ -1043,7 +1110,7 @@ def train(args: argparse.Namespace) -> None:
                 frame_times=frame_times,
                 target_frame_index=target_frame_index,
                 target_valid_mask=target_valid_mask,
-                beta=args.discrete_rate,
+                generalized_kl=generalized_kl,
                 target_only=args.loss_on_target_only,
             )
 
@@ -1167,7 +1234,8 @@ def train(args: argparse.Namespace) -> None:
                     num_colors=args.num_colors,
                     min_noise_level=args.min_noise_level,
                     max_noise_level=args.max_noise_level,
-                    beta=args.discrete_rate,
+                    path=path,
+                    generalized_kl=generalized_kl,
                     target_only=args.loss_on_target_only,
                     show_progress=False,
                     autocast_enabled=bf16_autocast,
@@ -1178,7 +1246,7 @@ def train(args: argparse.Namespace) -> None:
                     device=device,
                     num_colors=args.num_colors,
                     sample_steps=args.sample_steps,
-                    beta=args.discrete_rate,
+                    path=path,
                     reverse_sampler=args.reverse_sampler,
                     collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
                     show_progress=is_main,
@@ -1277,7 +1345,8 @@ def train(args: argparse.Namespace) -> None:
                 num_colors=args.num_colors,
                 min_noise_level=args.min_noise_level,
                 max_noise_level=args.max_noise_level,
-                beta=args.discrete_rate,
+                path=path,
+                generalized_kl=generalized_kl,
                 target_only=args.loss_on_target_only,
                 show_progress=False,
                 autocast_enabled=bf16_autocast,
@@ -1288,7 +1357,7 @@ def train(args: argparse.Namespace) -> None:
                 device=device,
                 num_colors=args.num_colors,
                 sample_steps=args.sample_steps,
-                beta=args.discrete_rate,
+                path=path,
                 reverse_sampler=args.reverse_sampler,
                 collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
                 show_progress=is_main,
