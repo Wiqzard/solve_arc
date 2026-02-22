@@ -15,7 +15,7 @@ dataset_args=(
   #--rearc-limit -1
   --include-barc
   --barc-path "raw_data/BARC"
-  --barc-limit 400000 #-1
+  #--barc-limit -1
   --num-demos 3
   --image-size 32
   --num-colors 12
@@ -25,9 +25,9 @@ dataset_args=(
 )
 
 model_args=(
-  --embed-dim 512
-  --depth 10
-  --num-heads 8
+  --embed-dim 576
+  --depth 16
+  --num-heads 18
   --mlp-ratio 4.0
   --dropout 0.0
   --attention-backend "auto"
@@ -39,26 +39,27 @@ model_args=(
 training_args=(
   --seed 42
   --batch-size 4
-  --eval-batch-size 8
+  --eval-batch-size 4
   --log-every-steps 5
   --eval-every-steps "${EVAL_EVERY_STEPS}"
-  --epochs 100
+  --epochs 20 #20 #100
   --learning-rate 3e-4
   --lr-scheduler "cosine"
   --min-learning-rate 1e-6
   --weight-decay 0
   --bf16-autocast
   --compile
-  --discrete-rate 5.0
+  --discrete-scheduler "cosine"
   --sample-steps 40
   --save-path "saves/flow_context_vit_discrete/checkpoint_last.pt"
   --best-save-path "saves/flow_context_vit_discrete/checkpoint_best.pt"
   # --reverse-sampler "sample"
 )
+#--wandb-project "VisionARC"
 
 log_args=(
   --use-wandb
-  --wandb-project "VisionARC"
+  --wandb-project "solve_arc-VARC"
   --wandb-num-vis-samples 8
   --wandb-vis-scale 8
   --wandb-train-vis-every-steps "${EVAL_EVERY_STEPS}"
