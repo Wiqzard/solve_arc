@@ -191,6 +191,12 @@ def parse_args() -> argparse.Namespace:
         help="Attention backend for framewise-causal mode.",
     )
     parser.add_argument(
+        "--mask-pad-attention",
+        action="store_true",
+        default=False,
+        help="Mask padded tokens in attention. For flex-causal attention, this is combined with framewise causal masking.",
+    )
+    parser.add_argument(
         "--rope-3d",
         nargs="?",
         const=True,
@@ -1060,6 +1066,7 @@ def train(args: argparse.Namespace) -> None:
         mlp_ratio=args.mlp_ratio,
         dropout=args.dropout,
         framewise_causal_attention=args.framewise_causal_attention,
+        mask_pad_tokens_in_attention=args.mask_pad_attention,
         attention_backend=args.attention_backend,
         rope_3d=args.rope_3d,
         rope_base=args.rope_base,

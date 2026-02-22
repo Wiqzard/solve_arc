@@ -47,6 +47,7 @@ class FramewiseSelfAttention(nn.Module):
         dropout: float,
         attention_backend: str,
         causal: bool,
+        mask_padding_tokens: bool,
         use_3d_rope: bool,
         rope_base: float,
     ) -> None:
@@ -62,6 +63,7 @@ class FramewiseSelfAttention(nn.Module):
         self.dropout = dropout
         self.attention_backend = attention_backend
         self.causal = causal
+        self.mask_padding_tokens = mask_padding_tokens
         self.use_3d_rope = use_3d_rope
         self.rope_base = rope_base
         self.rope_axis_dim = (self.head_dim // 6) * 2
@@ -121,15 +123,20 @@ class FramewiseSelfAttention(nn.Module):
         frame_index_per_token: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
+        if not self.mask_padding_tokens:
+            key_padding_mask = None
         if self.causal:
             causal = frame_index_per_token[:, None] >= frame_index_per_token[None, :]
             if key_padding_mask is None:
                 return causal
+            query_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(-1)
             key_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(1)
-            return causal.unsqueeze(0).unsqueeze(0) & key_valid
+            return causal.unsqueeze(0).unsqueeze(0) & query_valid & key_valid
         if key_padding_mask is None:
             return None
-        return (~key_padding_mask).unsqueeze(1).unsqueeze(1)
+        query_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(-1)
+        key_valid = (~key_padding_mask).unsqueeze(1).unsqueeze(1)
+        return query_valid & key_valid
 
     def _get_flex_block_mask(
         self,
@@ -254,7 +261,7 @@ class FramewiseSelfAttention(nn.Module):
         if backend == "flex":
             block_mask = self._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
             score_mod = None
-            if key_padding_mask is not None:
+            if key_padding_mask is not None and self.mask_padding_tokens:
                 key_valid = (~key_padding_mask).to(device=x.device, dtype=torch.bool)
                 min_value = torch.finfo(q.dtype).min
 
@@ -265,8 +272,8 @@ class FramewiseSelfAttention(nn.Module):
                     q_idx: torch.Tensor,
                     kv_idx: torch.Tensor,
                 ) -> torch.Tensor:
-                    del head_idx, q_idx
-                    keep = key_valid[batch_idx, kv_idx]
+                    del head_idx
+                    keep = key_valid[batch_idx, q_idx] & key_valid[batch_idx, kv_idx]
                     return torch.where(keep, score, min_value)
 
             context = flex_attention(q, k, v, block_mask=block_mask, score_mod=score_mod)
@@ -302,6 +309,7 @@ class FramewiseTransformerBlock(nn.Module):
         dropout: float,
         attention_backend: str,
         causal: bool,
+        mask_padding_tokens: bool,
         use_3d_rope: bool,
         rope_base: float,
     ) -> None:
@@ -313,6 +321,7 @@ class FramewiseTransformerBlock(nn.Module):
             dropout=dropout,
             attention_backend=attention_backend,
             causal=causal,
+            mask_padding_tokens=mask_padding_tokens,
             use_3d_rope=use_3d_rope,
             rope_base=rope_base,
         )
@@ -362,6 +371,7 @@ class ARCFlowViT(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
         framewise_causal_attention: bool = False,
+        mask_pad_tokens_in_attention: bool = False,
         attention_backend: str = "auto",
         rope_3d: bool = False,
         rope_base: float = 10000.0,
@@ -373,6 +383,7 @@ class ARCFlowViT(nn.Module):
         self.spatial_tokens = image_size * image_size
         self.embed_dim = embed_dim
         self.framewise_causal_attention = framewise_causal_attention
+        self.mask_pad_tokens_in_attention = mask_pad_tokens_in_attention
         self.attention_backend = attention_backend
         self.rope_3d = rope_3d
         self.rope_base = rope_base
@@ -415,6 +426,7 @@ class ARCFlowViT(nn.Module):
                         dropout=dropout,
                         attention_backend=attention_backend,
                         causal=framewise_causal_attention,
+                        mask_padding_tokens=mask_pad_tokens_in_attention,
                         use_3d_rope=rope_3d,
                         rope_base=rope_base,
                     )
@@ -482,7 +494,8 @@ class ARCFlowViT(nn.Module):
         if frame_valid_mask is not None:
             if frame_valid_mask.shape != (batch_size, frames, height, width):
                 raise ValueError("frame_valid_mask shape mismatch")
-            key_padding_mask = ~frame_valid_mask.reshape(batch_size, frames * self.spatial_tokens).bool()
+            if self.mask_pad_tokens_in_attention:
+                key_padding_mask = ~frame_valid_mask.reshape(batch_size, frames * self.spatial_tokens).bool()
 
         base_time_embed = self.time_embed_base(frame_times.reshape(-1)).reshape(batch_size, frames, self.embed_dim)
         encoded = tokens
@@ -524,6 +537,7 @@ class ARCFlowViTLooped(ARCFlowViT):
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
         framewise_causal_attention: bool = False,
+        mask_pad_tokens_in_attention: bool = False,
         attention_backend: str = "auto",
         rope_3d: bool = False,
         rope_base: float = 10000.0,
@@ -539,6 +553,7 @@ class ARCFlowViTLooped(ARCFlowViT):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             framewise_causal_attention=framewise_causal_attention,
+            mask_pad_tokens_in_attention=mask_pad_tokens_in_attention,
             attention_backend=attention_backend,
             rope_3d=rope_3d,
             rope_base=rope_base,
