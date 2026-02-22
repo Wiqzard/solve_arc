@@ -1,8 +1,9 @@
 program: flow_train_discrete_ARC.py
 method: random #bayes
 metric:
-  goal: minimize
-  name: eval/loss
+  goal: maximize
+  name: eval/sample_acc_at_95
+
 #early_terminate:
 #  type: hyperband
 #  min_iter: 3
@@ -24,8 +25,8 @@ parameters:
     values: [384, 512, 768, 1024]
   num-heads:
     values: [8, 12, 16, 32]
-  nested-dropout:
-    values: [false, true]
+  #nested-dropout:
+  #  values: [false, true]
   #batch-size:
   #  values: [4, 8, 16, 32]
   #rope-base:
@@ -80,6 +81,7 @@ command:
   - "500"
   - --epochs
   - "1"
+  - --nested-dropout
   - --learning-rate
   - "3e-4"
   - --lr-scheduler

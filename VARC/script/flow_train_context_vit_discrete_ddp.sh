@@ -5,12 +5,6 @@ export OMP_NUM_THREADS=8
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-500}"
-#NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
-#
-#nested_dropout_args=()
-#if [[ "${NESTED_DROPOUT}" == "1" ]]; then
-#  nested_dropout_args+=(--nested-dropout)
-#fi
 
 dataset_args=(
   --data-root "raw_data/ARC-AGI"
@@ -49,6 +43,7 @@ training_args=(
   --log-every-steps 5
   --eval-every-steps "${EVAL_EVERY_STEPS}"
   --epochs 20 #20 #100
+  --nested-dropout
   --learning-rate 3e-4
   --lr-scheduler "cosine"
   --min-learning-rate 1e-6
@@ -76,7 +71,6 @@ log_args=(
 torchrun --standalone --nproc_per_node "${NPROC_PER_NODE}" flow_train_discrete_ARC.py \
   --ddp \
   "${dataset_args[@]}" \
-  "${nested_dropout_args[@]}" \
   "${model_args[@]}" \
   "${training_args[@]}" \
   "${log_args[@]}"
