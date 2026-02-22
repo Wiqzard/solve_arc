@@ -14,6 +14,11 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from flow_matching.loss import MixturePathGeneralizedKL
+from flow_matching.path import MixtureDiscreteProbPath
+from flow_matching.path.scheduler import ExponentialScheduler
+from flow_matching.solver import MixtureDiscreteEulerSolver
+from flow_matching.utils import ModelWrapper
 from src.ARC_FlowViT import ARCFlowViT, ARCFlowViTLooped
 from src.ARC_context_flow_loader import build_flow_context_dataloaders
 try:
@@ -549,21 +554,8 @@ def sample_frame_times(
     return times * (max_t - min_t) + min_t
 
 
-def alpha_and_dalpha_from_time(
-    t: torch.Tensor,
-    *,
-    beta: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Exponential scheduler: alpha_t = 1 - exp(-beta * t), d_alpha_t = beta * exp(-beta * t)
-    sigma = torch.exp(-float(beta) * t)
-    alpha = 1.0 - sigma
-    d_alpha = float(beta) * sigma
-    return alpha, d_alpha
-
-
-def sigma_from_time(t: torch.Tensor, *, beta: float) -> torch.Tensor:
-    alpha, _ = alpha_and_dalpha_from_time(t, beta=beta)
-    return 1.0 - alpha
+def build_discrete_path(beta: float) -> MixtureDiscreteProbPath:
+    return MixtureDiscreteProbPath(scheduler=ExponentialScheduler(beta=beta))
 
 
 def sample_xt_from_qt(
@@ -585,9 +577,8 @@ def sample_xt_from_qt(
         device=clean_tokens.device,
         dtype=clean_tokens.dtype,
     )
-    sigma = sigma_from_time(frame_times, beta=beta)[:, :, None, None]
-    source_mask = torch.rand(clean_tokens.shape, device=clean_tokens.device) < sigma
-    x_t = torch.where(source_mask, source_tokens, clean_tokens)
+    path = build_discrete_path(beta=beta)
+    x_t = path.sample(x_0=source_tokens, x_1=clean_tokens, t=frame_times).x_t
 
     # Keep padding area unchanged; those positions are always masked out of the loss.
     valid = frame_valid_mask.bool()
@@ -606,56 +597,26 @@ def discrete_flow_matching_loss(
     beta: float,
     target_only: bool,
 ) -> torch.Tensor:
-    # logits: (B, F, H, W, C), predicts p_theta(x_1 | x_t, t)
-    def generalized_kl_per_token(
-        *,
-        log_probs: torch.Tensor,
-        probs: torch.Tensor,
-        x1_tokens: torch.Tensor,
-        xt_tokens: torch.Tensor,
-        jump_coefficient: torch.Tensor,
-    ) -> torch.Tensor:
-        p1_xt = probs.gather(dim=-1, index=xt_tokens.unsqueeze(-1)).squeeze(-1)
-        log_p1_x1 = log_probs.gather(dim=-1, index=x1_tokens.unsqueeze(-1)).squeeze(-1)
-        delta = (xt_tokens == x1_tokens).float()
-        return -jump_coefficient * (p1_xt - delta + (1.0 - delta) * log_p1_x1)
+    # Use Meta-style generalized KL class on flattened per-frame sequences.
+    path = build_discrete_path(beta=beta)
+    loss_module = MixturePathGeneralizedKL(path=path, reduction="none")
 
-    alpha_t, d_alpha_t = alpha_and_dalpha_from_time(
-        frame_times,
-        beta=beta,
-    )
-    jump_coeff = (d_alpha_t / (1.0 - alpha_t).clamp_min(1e-8))[:, :, None, None]
+    batch_size, frame_count, height, width, num_colors = logits.shape
+    seq_len = height * width
+    logits_flat = logits.reshape(batch_size * frame_count, seq_len, num_colors)
+    x1_flat = clean_tokens.reshape(batch_size * frame_count, seq_len)
+    xt_flat = x_t_tokens.reshape(batch_size * frame_count, seq_len)
+    t_flat = frame_times.reshape(batch_size * frame_count)
+    loss_map = loss_module(logits_flat, x1_flat, xt_flat, t_flat).reshape(batch_size, frame_count, height, width)
 
     if target_only:
-        batch = logits.size(0)
-        batch_idx = torch.arange(batch, device=logits.device)
-        pred = logits[batch_idx, target_frame_index]
-        target = clean_tokens[batch_idx, target_frame_index]
-        xt = x_t_tokens[batch_idx, target_frame_index]
+        batch_idx = torch.arange(batch_size, device=logits.device)
+        target_loss = loss_map[batch_idx, target_frame_index]
         valid = target_valid_mask.bool()
-        jump_coeff_target = jump_coeff[batch_idx, target_frame_index]
-        log_probs = F.log_softmax(pred, dim=-1)
-        probs = torch.exp(log_probs)
-        loss_map = generalized_kl_per_token(
-            log_probs=log_probs,
-            probs=probs,
-            x1_tokens=target,
-            xt_tokens=xt,
-            jump_coefficient=jump_coeff_target,
-        )
-        masked = loss_map * valid.float()
+        masked = target_loss * valid.float()
         denom = valid.float().sum().clamp_min(1.0)
         return masked.sum() / denom
 
-    log_probs = F.log_softmax(logits, dim=-1)
-    probs = torch.exp(log_probs)
-    loss_map = generalized_kl_per_token(
-        log_probs=log_probs,
-        probs=probs,
-        x1_tokens=clean_tokens,
-        xt_tokens=x_t_tokens,
-        jump_coefficient=jump_coeff,
-    )
     valid = frame_valid_mask.bool()
     masked = loss_map * valid.float()
     denom = valid.float().sum().clamp_min(1.0)
@@ -676,55 +637,69 @@ def denoise_last_solution_frame_discrete(
     autocast_enabled: bool = False,
 ) -> torch.Tensor:
     model.eval()
-    state = frames.clone()
-    batch_size, frame_count, _, _ = state.shape
-    device = state.device
+    batch_size, frame_count, height, width = frames.shape
+    device = frames.device
     batch_idx = torch.arange(batch_size, device=device)
+    target_valid_mask = frame_valid_mask[batch_idx, target_frame_index].bool()
+    path = build_discrete_path(beta=beta)
+    step_size = 1.0 / float(max(steps, 1))
 
-    # Start from source distribution (uniform random tokens) on the target frame.
-    random_target = torch.randint(
+    class ARCPosteriorWrapper(ModelWrapper):
+        def __init__(self, flow_model: ARCFlowViT, vocab_size: int, force_argmax: bool) -> None:
+            super().__init__(flow_model)
+            self.flow_model = flow_model
+            self.vocab_size = vocab_size
+            self.force_argmax = force_argmax
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, **extras) -> torch.Tensor:
+            state_context = extras["state_context"]
+            frame_valid_mask_local = extras["frame_valid_mask"]
+            target_frame_index_local = extras["target_frame_index"]
+            autocast_enabled_local = bool(extras.get("autocast_enabled", False))
+
+            bsz, fcount, hh, ww = state_context.shape
+            target_tokens = x.view(bsz, hh, ww).long()
+            state = state_context.clone()
+            state[batch_idx, target_frame_index_local] = target_tokens
+
+            frame_times = torch.zeros((bsz, fcount), dtype=torch.float32, device=state.device)
+            frame_times[batch_idx, target_frame_index_local] = t
+
+            state_onehot = one_hot_frames(state, num_colors=self.vocab_size)
+            cudagraph_step_begin_if_available()
+            with autocast_context(state.device, autocast_enabled_local):
+                logits = self.flow_model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask_local)
+            target_logits = logits[batch_idx, target_frame_index_local].float().reshape(bsz, hh * ww, self.vocab_size)
+            probs = torch.softmax(target_logits, dim=-1)
+            if self.force_argmax:
+                argmax_tokens = probs.argmax(dim=-1)
+                probs = F.one_hot(argmax_tokens, num_classes=self.vocab_size).float()
+            return probs
+
+    wrapper = ARCPosteriorWrapper(model, num_colors, force_argmax=(reverse_sampler == "argmax"))
+    solver = MixtureDiscreteEulerSolver(model=wrapper, path=path, vocabulary_size=num_colors)
+
+    x_init = torch.randint(
         low=0,
         high=num_colors,
-        size=(batch_size, state.size(2), state.size(3)),
+        size=(batch_size, height * width),
         device=device,
-        dtype=state.dtype,
+        dtype=torch.long,
     )
-    state[batch_idx, target_frame_index] = random_target
-
-    target_valid_mask = frame_valid_mask[batch_idx, target_frame_index].bool()
-    for step in range(steps):
-        t = float(step) / float(steps)
-        h = 1.0 / float(max(steps, 1))
-        t_tensor = torch.tensor([t], device=device, dtype=torch.float32)
-        alpha_t, d_alpha_t = alpha_and_dalpha_from_time(t_tensor, beta=beta)
-        jump_coeff = (d_alpha_t / (1.0 - alpha_t).clamp_min(1e-8)).item()
-        jump_prob = 1.0 - float(np.exp(-h * jump_coeff))
-        frame_times = torch.zeros((batch_size, frame_count), dtype=torch.float32, device=device)
-        frame_times[batch_idx, target_frame_index] = t
-
-        state_onehot = one_hot_frames(state, num_colors=num_colors)
-        cudagraph_step_begin_if_available()
-        with autocast_context(device, autocast_enabled):
-            logits = model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask)
-        target_logits = logits[batch_idx, target_frame_index].float()
-        pred_x1_probs = torch.softmax(target_logits, dim=-1).reshape(-1, num_colors)
-        if reverse_sampler == "argmax":
-            proposed_flat = torch.argmax(pred_x1_probs, dim=-1)
-        else:
-            proposed_flat = torch.multinomial(pred_x1_probs, num_samples=1).squeeze(-1)
-        proposed = proposed_flat.reshape(batch_size, state.size(2), state.size(3))
-
-        current = state[batch_idx, target_frame_index]
-        if step == steps - 1:
-            current[target_valid_mask] = proposed[target_valid_mask]
-        else:
-            jump_mask = (
-                torch.rand(current.shape, device=device) < jump_prob
-            ) & target_valid_mask & (proposed != current)
-            current[jump_mask] = proposed[jump_mask]
-        state[batch_idx, target_frame_index] = current
-
-    return state[batch_idx, target_frame_index]
+    sampled = solver.sample(
+        x_init=x_init,
+        step_size=step_size,
+        time_grid=torch.tensor([0.0, 1.0], device=device),
+        return_intermediates=False,
+        verbose=False,
+        state_context=frames,
+        frame_valid_mask=frame_valid_mask,
+        target_frame_index=target_frame_index,
+        autocast_enabled=autocast_enabled,
+    )
+    predicted = sampled.view(batch_size, height, width)
+    original_target = frames[batch_idx, target_frame_index]
+    return torch.where(target_valid_mask, predicted, original_target)
 
 
 @torch.no_grad()
