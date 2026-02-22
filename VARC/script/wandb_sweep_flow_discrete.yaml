@@ -50,7 +50,7 @@ command:
   - --eval-split
   - evaluation
   - --max-demos
-  - "3"
+  - "10"
   - --num-colors
   - "12"
   - --mlp-ratio

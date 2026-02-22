@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default="raw_data/ARC-AGI")
     parser.add_argument("--train-split", type=str, default="training")
     parser.add_argument("--eval-split", type=str, default="evaluation")
-    parser.add_argument("--max-demos", "--num-demos", dest="max_demos", type=int, default=3)
+    parser.add_argument("--max-demos", "--num-demos", dest="max_demos", type=int, default=10)
     parser.add_argument("--image-size", type=int, default=32)
     parser.add_argument("--num-colors", type=int, default=12)
     parser.add_argument("--embed-dim", type=int, default=512)

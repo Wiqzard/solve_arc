@@ -5,12 +5,12 @@ export OMP_NUM_THREADS=8
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-500}"
-NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
-
-nested_dropout_args=()
-if [[ "${NESTED_DROPOUT}" == "1" ]]; then
-  nested_dropout_args+=(--nested-dropout)
-fi
+#NESTED_DROPOUT="${NESTED_DROPOUT:-0}"
+#
+#nested_dropout_args=()
+#if [[ "${NESTED_DROPOUT}" == "1" ]]; then
+#  nested_dropout_args+=(--nested-dropout)
+#fi
 
 dataset_args=(
   --data-root "raw_data/ARC-AGI"
@@ -22,7 +22,7 @@ dataset_args=(
   --include-barc
   --barc-path "raw_data/BARC"
   #--barc-limit -1
-  --max-demos 3
+  --max-demos 10
   --image-size 32
   --num-colors 12
   --flow-train-resolution-aug

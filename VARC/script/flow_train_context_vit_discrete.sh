@@ -10,7 +10,7 @@ python flow_train_discrete_ARC.py \
   --data-root "raw_data/ARC-AGI" \
   --train-split "training" \
   --eval-split "evaluation" \
-  --max-demos 3 \
+  --max-demos 10 \
   --image-size 30 \
   --num-colors 12 \
   --embed-dim 512 \

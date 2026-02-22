@@ -50,7 +50,7 @@ command:
   - --eval-split
   - evaluation
   - --max-demos
-  - "3"
+  - "10"
   - --image-size
   - "32"
   - --num-colors
