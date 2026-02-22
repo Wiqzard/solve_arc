@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-import math
 import os
 import random
 import time
@@ -265,20 +264,7 @@ def parse_args() -> argparse.Namespace:
         "--discrete-rate",
         type=float,
         default=5.0,
-        help="CTMC jump rate beta for kappa_t = 1-exp(-beta*t).",
-    )
-    parser.add_argument(
-        "--discrete-rate-schedule",
-        type=str,
-        default="constant",
-        choices=("constant", "linear", "cosine"),
-        help="Time-dependent schedule for beta(t) used by discrete flow path and sampler.",
-    )
-    parser.add_argument(
-        "--discrete-rate-end",
-        type=float,
-        default=None,
-        help="Final beta at t=1 for non-constant schedules; defaults to --discrete-rate.",
+        help="Exponential scheduler rate for alpha_t = 1 - exp(-beta*t).",
     )
     parser.add_argument(
         "--reverse-sampler",
@@ -327,10 +313,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Number of samples from the current train batch to visualize.",
     )
-    args = parser.parse_args()
-    if args.discrete_rate_end is None:
-        args.discrete_rate_end = args.discrete_rate
-    return args
+    return parser.parse_args()
 
 
 def one_hot_frames(frames: torch.Tensor, num_colors: int) -> torch.Tensor:
@@ -566,56 +549,21 @@ def sample_frame_times(
     return times * (max_t - min_t) + min_t
 
 
-def beta_from_time(
+def alpha_and_dalpha_from_time(
     t: torch.Tensor,
     *,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
-) -> torch.Tensor:
-    if beta_schedule == "constant":
-        return torch.full_like(t, float(beta_start))
-    if beta_schedule == "linear":
-        return float(beta_start) + (float(beta_end) - float(beta_start)) * t
-    if beta_schedule == "cosine":
-        # Smooth interpolation from beta_start at t=0 to beta_end at t=1.
-        return float(beta_end) + 0.5 * (float(beta_start) - float(beta_end)) * (1.0 + torch.cos(math.pi * t))
-    raise ValueError(f"Unsupported beta schedule: {beta_schedule}")
+    beta: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Exponential scheduler: alpha_t = 1 - exp(-beta * t), d_alpha_t = beta * exp(-beta * t)
+    sigma = torch.exp(-float(beta) * t)
+    alpha = 1.0 - sigma
+    d_alpha = float(beta) * sigma
+    return alpha, d_alpha
 
 
-def integrated_beta_from_zero(
-    t: torch.Tensor,
-    *,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
-) -> torch.Tensor:
-    if beta_schedule == "constant":
-        return float(beta_start) * t
-    if beta_schedule == "linear":
-        delta = float(beta_end) - float(beta_start)
-        return float(beta_start) * t + 0.5 * delta * (t**2)
-    if beta_schedule == "cosine":
-        delta = float(beta_start) - float(beta_end)
-        return float(beta_end) * t + 0.5 * delta * (t + torch.sin(math.pi * t) / math.pi)
-    raise ValueError(f"Unsupported beta schedule: {beta_schedule}")
-
-
-def sigma_from_time(
-    t: torch.Tensor,
-    *,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
-) -> torch.Tensor:
-    return torch.exp(
-        -integrated_beta_from_zero(
-            t,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
-        )
-    )
+def sigma_from_time(t: torch.Tensor, *, beta: float) -> torch.Tensor:
+    alpha, _ = alpha_and_dalpha_from_time(t, beta=beta)
+    return 1.0 - alpha
 
 
 def sample_xt_from_qt(
@@ -624,9 +572,7 @@ def sample_xt_from_qt(
     frame_times: torch.Tensor,
     *,
     num_colors: int,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
+    beta: float,
 ) -> torch.Tensor:
     """
     Sample x_t from a mixture discrete path:
@@ -639,12 +585,7 @@ def sample_xt_from_qt(
         device=clean_tokens.device,
         dtype=clean_tokens.dtype,
     )
-    sigma = sigma_from_time(
-        frame_times,
-        beta_start=beta_start,
-        beta_end=beta_end,
-        beta_schedule=beta_schedule,
-    )[:, :, None, None]
+    sigma = sigma_from_time(frame_times, beta=beta)[:, :, None, None]
     source_mask = torch.rand(clean_tokens.shape, device=clean_tokens.device) < sigma
     x_t = torch.where(source_mask, source_tokens, clean_tokens)
 
@@ -662,9 +603,7 @@ def discrete_flow_matching_loss(
     frame_times: torch.Tensor,
     target_frame_index: torch.Tensor,
     target_valid_mask: torch.Tensor,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
+    beta: float,
     target_only: bool,
 ) -> torch.Tensor:
     # logits: (B, F, H, W, C), predicts p_theta(x_1 | x_t, t)
@@ -681,12 +620,11 @@ def discrete_flow_matching_loss(
         delta = (xt_tokens == x1_tokens).float()
         return -jump_coefficient * (p1_xt - delta + (1.0 - delta) * log_p1_x1)
 
-    beta_t = beta_from_time(
+    alpha_t, d_alpha_t = alpha_and_dalpha_from_time(
         frame_times,
-        beta_start=beta_start,
-        beta_end=beta_end,
-        beta_schedule=beta_schedule,
-    )[:, :, None, None]
+        beta=beta,
+    )
+    jump_coeff = (d_alpha_t / (1.0 - alpha_t).clamp_min(1e-8))[:, :, None, None]
 
     if target_only:
         batch = logits.size(0)
@@ -695,7 +633,7 @@ def discrete_flow_matching_loss(
         target = clean_tokens[batch_idx, target_frame_index]
         xt = x_t_tokens[batch_idx, target_frame_index]
         valid = target_valid_mask.bool()
-        jump_coeff_target = beta_t[batch_idx, target_frame_index]
+        jump_coeff_target = jump_coeff[batch_idx, target_frame_index]
         log_probs = F.log_softmax(pred, dim=-1)
         probs = torch.exp(log_probs)
         loss_map = generalized_kl_per_token(
@@ -716,7 +654,7 @@ def discrete_flow_matching_loss(
         probs=probs,
         x1_tokens=clean_tokens,
         xt_tokens=x_t_tokens,
-        jump_coefficient=beta_t,
+        jump_coefficient=jump_coeff,
     )
     valid = frame_valid_mask.bool()
     masked = loss_map * valid.float()
@@ -733,9 +671,7 @@ def denoise_last_solution_frame_discrete(
     target_frame_index: torch.Tensor,
     num_colors: int,
     steps: int,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
+    beta: float,
     reverse_sampler: str,
     autocast_enabled: bool = False,
 ) -> torch.Tensor:
@@ -758,24 +694,11 @@ def denoise_last_solution_frame_discrete(
     target_valid_mask = frame_valid_mask[batch_idx, target_frame_index].bool()
     for step in range(steps):
         t = float(step) / float(steps)
-        t_next = min(float(step + 1) / float(steps), 1.0)
+        h = 1.0 / float(max(steps, 1))
         t_tensor = torch.tensor([t], device=device, dtype=torch.float32)
-        t_next_tensor = torch.tensor([t_next], device=device, dtype=torch.float32)
-        beta_integral_step = (
-            integrated_beta_from_zero(
-                t_next_tensor,
-                beta_start=beta_start,
-                beta_end=beta_end,
-                beta_schedule=beta_schedule,
-            )
-            - integrated_beta_from_zero(
-                t_tensor,
-                beta_start=beta_start,
-                beta_end=beta_end,
-                beta_schedule=beta_schedule,
-            )
-        ).item()
-        jump_prob = 1.0 - math.exp(-beta_integral_step)
+        alpha_t, d_alpha_t = alpha_and_dalpha_from_time(t_tensor, beta=beta)
+        jump_coeff = (d_alpha_t / (1.0 - alpha_t).clamp_min(1e-8)).item()
+        jump_prob = 1.0 - float(np.exp(-h * jump_coeff))
         frame_times = torch.zeros((batch_size, frame_count), dtype=torch.float32, device=device)
         frame_times[batch_idx, target_frame_index] = t
 
@@ -812,9 +735,7 @@ def evaluate_last_frame_accuracy(
     device: torch.device,
     num_colors: int,
     sample_steps: int,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
+    beta: float,
     reverse_sampler: str,
     collect_examples: int = 0,
     show_progress: bool = True,
@@ -850,9 +771,7 @@ def evaluate_last_frame_accuracy(
             target_frame_index=target_frame_index,
             num_colors=num_colors,
             steps=sample_steps,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
+            beta=beta,
             reverse_sampler=reverse_sampler,
             autocast_enabled=autocast_enabled,
         )
@@ -936,9 +855,7 @@ def evaluate_discrete_flow_loss(
     num_colors: int,
     min_noise_level: float,
     max_noise_level: float,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
+    beta: float,
     target_only: bool,
     show_progress: bool = False,
     autocast_enabled: bool = False,
@@ -968,9 +885,7 @@ def evaluate_discrete_flow_loss(
             frame_valid_mask,
             frame_times,
             num_colors=num_colors,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
+            beta=beta,
         )
         x_t = one_hot_frames(x_t_tokens, num_colors=num_colors)
         cudagraph_step_begin_if_available()
@@ -984,9 +899,7 @@ def evaluate_discrete_flow_loss(
             frame_times=frame_times,
             target_frame_index=target_frame_index,
             target_valid_mask=target_valid_mask,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
+            beta=beta,
             target_only=target_only,
         )
 
@@ -1141,9 +1054,7 @@ def train(args: argparse.Namespace) -> None:
                 frame_valid_mask,
                 frame_times,
                 num_colors=args.num_colors,
-                beta_start=args.discrete_rate,
-                beta_end=args.discrete_rate_end,
-                beta_schedule=args.discrete_rate_schedule,
+                beta=args.discrete_rate,
             )
             x_t = one_hot_frames(x_t_tokens, num_colors=args.num_colors)
             cudagraph_step_begin_if_available()
@@ -1157,9 +1068,7 @@ def train(args: argparse.Namespace) -> None:
                 frame_times=frame_times,
                 target_frame_index=target_frame_index,
                 target_valid_mask=target_valid_mask,
-                beta_start=args.discrete_rate,
-                beta_end=args.discrete_rate_end,
-                beta_schedule=args.discrete_rate_schedule,
+                beta=args.discrete_rate,
                 target_only=args.loss_on_target_only,
             )
 
@@ -1283,9 +1192,7 @@ def train(args: argparse.Namespace) -> None:
                     num_colors=args.num_colors,
                     min_noise_level=args.min_noise_level,
                     max_noise_level=args.max_noise_level,
-                    beta_start=args.discrete_rate,
-                    beta_end=args.discrete_rate_end,
-                    beta_schedule=args.discrete_rate_schedule,
+                    beta=args.discrete_rate,
                     target_only=args.loss_on_target_only,
                     show_progress=False,
                     autocast_enabled=bf16_autocast,
@@ -1296,9 +1203,7 @@ def train(args: argparse.Namespace) -> None:
                     device=device,
                     num_colors=args.num_colors,
                     sample_steps=args.sample_steps,
-                    beta_start=args.discrete_rate,
-                    beta_end=args.discrete_rate_end,
-                    beta_schedule=args.discrete_rate_schedule,
+                    beta=args.discrete_rate,
                     reverse_sampler=args.reverse_sampler,
                     collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
                     show_progress=is_main,
@@ -1397,9 +1302,7 @@ def train(args: argparse.Namespace) -> None:
                 num_colors=args.num_colors,
                 min_noise_level=args.min_noise_level,
                 max_noise_level=args.max_noise_level,
-                beta_start=args.discrete_rate,
-                beta_end=args.discrete_rate_end,
-                beta_schedule=args.discrete_rate_schedule,
+                beta=args.discrete_rate,
                 target_only=args.loss_on_target_only,
                 show_progress=False,
                 autocast_enabled=bf16_autocast,
@@ -1410,9 +1313,7 @@ def train(args: argparse.Namespace) -> None:
                 device=device,
                 num_colors=args.num_colors,
                 sample_steps=args.sample_steps,
-                beta_start=args.discrete_rate,
-                beta_end=args.discrete_rate_end,
-                beta_schedule=args.discrete_rate_schedule,
+                beta=args.discrete_rate,
                 reverse_sampler=args.reverse_sampler,
                 collect_examples=args.wandb_num_vis_samples if (wandb_run is not None and is_main) else 0,
                 show_progress=is_main,
