@@ -80,26 +80,6 @@ class FramewiseSelfAttention(nn.Module):
         self._flex_block_mask_cache: Dict[tuple[int, str, bool], Any] = {}
         self._warned_flex_fallback = False
 
-    @staticmethod
-    def _is_compiling() -> bool:
-        compiler = getattr(torch, "compiler", None)
-        if compiler is not None:
-            is_compiling_fn = getattr(compiler, "is_compiling", None)
-            if callable(is_compiling_fn):
-                try:
-                    return bool(is_compiling_fn())
-                except Exception:
-                    pass
-        dynamo = getattr(torch, "_dynamo", None)
-        if dynamo is not None:
-            is_compiling_fn = getattr(dynamo, "is_compiling", None)
-            if callable(is_compiling_fn):
-                try:
-                    return bool(is_compiling_fn())
-                except Exception:
-                    pass
-        return False
-
     def _resolve_backend(self, x: torch.Tensor) -> str:
         if self.attention_backend == "sdpa":
             return "sdpa"
@@ -146,12 +126,10 @@ class FramewiseSelfAttention(nn.Module):
         if create_block_mask is None:
             raise RuntimeError("torch flex_attention is unavailable.")
         seq_len = int(frame_index_per_token.numel())
-        use_cache = not self._is_compiling()
         cache_key = (seq_len, str(frame_index_per_token.device), self.causal)
-        if use_cache:
-            cached = self._flex_block_mask_cache.get(cache_key)
-            if cached is not None:
-                return cached
+        cached = self._flex_block_mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         frame_ids = frame_index_per_token
 
@@ -174,8 +152,7 @@ class FramewiseSelfAttention(nn.Module):
             KV_LEN=seq_len,
             device=frame_index_per_token.device,
         )
-        if use_cache:
-            self._flex_block_mask_cache[cache_key] = block_mask
+        self._flex_block_mask_cache[cache_key] = block_mask
         return block_mask
 
     def _rotary_cos_sin(self, position_ids: torch.Tensor, *, half_dim: int, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
