@@ -270,8 +270,6 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Apply discrete flow-matching loss only on the final solution frame.",
     )
-    parser.add_argument("--min-noise-level", type=float, default=1e-3)
-    parser.add_argument("--max-noise-level", type=float, default=0.999)
     parser.add_argument(
         "--discrete-rate",
         type=float,
@@ -579,11 +577,8 @@ def sample_frame_times(
     batch_size: int,
     frames: int,
     device: torch.device,
-    min_t: float,
-    max_t: float,
 ) -> torch.Tensor:
-    times = torch.rand(batch_size, frames, device=device)
-    return times * (max_t - min_t) + min_t
+    return torch.rand(batch_size, frames, device=device)
 
 
 def build_discrete_path(
@@ -876,8 +871,6 @@ def evaluate_discrete_flow_loss(
     *,
     device: torch.device,
     num_colors: int,
-    min_noise_level: float,
-    max_noise_level: float,
     path: MixtureDiscreteProbPath,
     generalized_kl: MixturePathGeneralizedKL,
     target_only: bool,
@@ -901,8 +894,6 @@ def evaluate_discrete_flow_loss(
             batch_size=batch_size,
             frames=frame_count,
             device=device,
-            min_t=min_noise_level,
-            max_t=max_noise_level,
         )
         x_t_tokens = sample_xt_from_qt(
             frames,
@@ -1087,8 +1078,6 @@ def train(args: argparse.Namespace) -> None:
                 batch_size=batch_size,
                 frames=frame_count,
                 device=device,
-                min_t=args.min_noise_level,
-                max_t=args.max_noise_level,
             )
 
             x_t_tokens = sample_xt_from_qt(
@@ -1232,8 +1221,6 @@ def train(args: argparse.Namespace) -> None:
                     eval_loader if eval_loader is not None else train_loader,
                     device=device,
                     num_colors=args.num_colors,
-                    min_noise_level=args.min_noise_level,
-                    max_noise_level=args.max_noise_level,
                     path=path,
                     generalized_kl=generalized_kl,
                     target_only=args.loss_on_target_only,
@@ -1343,8 +1330,6 @@ def train(args: argparse.Namespace) -> None:
                 eval_loader if eval_loader is not None else train_loader,
                 device=device,
                 num_colors=args.num_colors,
-                min_noise_level=args.min_noise_level,
-                max_noise_level=args.max_noise_level,
                 path=path,
                 generalized_kl=generalized_kl,
                 target_only=args.loss_on_target_only,
