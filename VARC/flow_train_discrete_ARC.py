@@ -146,7 +146,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-split", type=str, default="training")
     parser.add_argument("--eval-split", type=str, default="evaluation")
 
-    parser.add_argument("--num-demos", type=int, default=3, help="m demonstration pairs.")
+    parser.add_argument(
+        "--max-demos",
+        "--num-demos",
+        dest="max_demos",
+        type=int,
+        default=3,
+        help="Maximum number of demonstration pairs (m) in the context.",
+    )
     parser.add_argument("--image-size", type=int, default=30)
     parser.add_argument("--num-colors", type=int, default=12)
 
@@ -273,6 +280,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Enable random resolution scaling augmentation for flow train episodes.",
     )
+    parser.add_argument(
+        "--nested-dropout",
+        action="store_true",
+        default=False,
+        help=(
+            "Train-time demo dropout: sample k in [1, max_demos], keep at most k demos, "
+            "and left-pad remaining demo slots."
+        ),
+    )
 
     parser.add_argument(
         "--loss-on-target-only",
@@ -371,7 +387,10 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Number of samples from the current train batch to visualize.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Backward-compatibility for existing code paths and scripts still using args.num_demos.
+    args.num_demos = args.max_demos
+    return args
 
 
 def one_hot_frames(frames: torch.Tensor, num_colors: int) -> torch.Tensor:

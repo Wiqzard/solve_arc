@@ -27,12 +27,13 @@ class ARCContextFlowDataset(Dataset):
         split: str,
         mode: str,
         *,
-        num_demos: int,
+        max_demos: int,
         image_size: int,
         num_colors: int,
         seed: int = 42,
         translation_augmentation: bool = True,
         resolution_augmentation: bool = True,
+        nested_dropout: bool = False,
         extra_train_roots: Optional[Iterable[Path]] = None,
         extra_train_limit: Optional[int] = None,
         extra_train_specs: Optional[
@@ -44,12 +45,13 @@ class ARCContextFlowDataset(Dataset):
         self.root = Path(root)
         self.split = split
         self.mode = mode
-        self.num_demos = num_demos
+        self.max_demos = max_demos
         self.image_size = image_size
         self.num_colors = num_colors
         self.seed = seed
         self.translation_augmentation = translation_augmentation
         self.resolution_augmentation = resolution_augmentation
+        self.nested_dropout = nested_dropout
 
         split_dir = self.root / "data" / split
         files = sorted(split_dir.glob("*.json"))
@@ -206,10 +208,12 @@ class ARCContextFlowDataset(Dataset):
         if query_source == "train" and query_index in candidates:
             candidates.remove(query_index)
         if not candidates:
-            candidates = list(self._train_valid_indices[task_name])
-        if len(candidates) >= self.num_demos:
-            return rng.sample(candidates, k=self.num_demos)
-        return [rng.choice(candidates) for _ in range(self.num_demos)]
+            return []
+        if len(candidates) <= self.max_demos:
+            selected = list(candidates)
+            rng.shuffle(selected)
+            return selected
+        return rng.sample(candidates, k=self.max_demos)
 
     def _iter_task_examples_from_payload(
         self,
@@ -366,9 +370,22 @@ class ARCContextFlowDataset(Dataset):
             query_index=query_index,
             rng=rng,
         )
+        requested_demo_count = self.max_demos
+        if self.mode == "train" and self.nested_dropout and self.max_demos > 0:
+            requested_demo_count = int(rng.randint(1, self.max_demos))
+        keep_demo_count = min(requested_demo_count, len(demo_indices))
+        demo_indices = demo_indices[-keep_demo_count:] if keep_demo_count > 0 else []
+        pad_demo_count = self.max_demos - keep_demo_count
 
         frames: List[torch.Tensor] = []
         frame_masks: List[torch.Tensor] = []
+
+        if pad_demo_count > 0:
+            pad_frame = torch.zeros((self.image_size, self.image_size), dtype=torch.long)
+            pad_mask = torch.zeros((self.image_size, self.image_size), dtype=torch.bool)
+            for _ in range(pad_demo_count):
+                frames.extend([pad_frame.clone(), pad_frame.clone()])
+                frame_masks.extend([pad_mask.clone(), pad_mask.clone()])
 
         for demo_idx in demo_indices:
             demo = train_examples[demo_idx]
@@ -402,6 +419,7 @@ class ARCContextFlowDataset(Dataset):
             "target_frame_index": torch.tensor(target_frame_index, dtype=torch.long),
             "target_output": query_output_frame,
             "target_valid_mask": query_output_mask,
+            "active_demo_count": torch.tensor(keep_demo_count, dtype=torch.long),
             "task_name": task_name,
             "query_index": torch.tensor(query_index, dtype=torch.long),
         }
@@ -413,6 +431,7 @@ def collate_flow_context(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     target_frame_index = torch.stack([item["target_frame_index"] for item in batch], dim=0)
     target_output = torch.stack([item["target_output"] for item in batch], dim=0)
     target_valid_mask = torch.stack([item["target_valid_mask"] for item in batch], dim=0)
+    active_demo_count = torch.stack([item["active_demo_count"] for item in batch], dim=0)
     task_names = [item["task_name"] for item in batch]
     query_indices = torch.stack([item["query_index"] for item in batch], dim=0)
 
@@ -422,6 +441,7 @@ def collate_flow_context(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "target_frame_index": target_frame_index,
         "target_output": target_output,
         "target_valid_mask": target_valid_mask,
+        "active_demo_count": active_demo_count,
         "task_names": task_names,
         "query_indices": query_indices,
     }
@@ -469,12 +489,13 @@ def build_flow_context_dataloaders(
         root=root,
         split=args.train_split,
         mode="train",
-        num_demos=args.num_demos,
+        max_demos=args.max_demos,
         image_size=args.image_size,
         num_colors=args.num_colors,
         seed=args.seed,
         translation_augmentation=train_translation_aug,
         resolution_augmentation=train_resolution_aug,
+        nested_dropout=bool(getattr(args, "nested_dropout", False)),
         extra_train_specs=extra_specs or None,
     )
     train_sampler: Optional[DistributedSampler] = None
@@ -503,12 +524,13 @@ def build_flow_context_dataloaders(
             root=root,
             split=args.eval_split,
             mode="eval",
-            num_demos=args.num_demos,
+            max_demos=args.max_demos,
             image_size=args.image_size,
             num_colors=args.num_colors,
             seed=args.seed,
             translation_augmentation=False,
             resolution_augmentation=False,
+            nested_dropout=False,
         )
         if distributed:
             eval_sampler = DistributedSampler(
