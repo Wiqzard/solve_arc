@@ -190,16 +190,15 @@ class FramewiseSelfAttention(nn.Module):
     def _infer_front_pad_frames(
         self,
         *,
-        frame_index_per_token: torch.Tensor,
         key_padding_mask: torch.Tensor,
+        frame_count: int,
+        spatial_tokens: int,
     ) -> Optional[torch.Tensor]:
         if key_padding_mask is None:
             return None
-        frame_count = int(frame_index_per_token.max().item()) + 1
-        seq_len = int(frame_index_per_token.numel())
-        if frame_count <= 0 or seq_len % frame_count != 0:
+        seq_len = int(key_padding_mask.size(1))
+        if frame_count <= 0 or spatial_tokens <= 0 or (frame_count * spatial_tokens) != seq_len:
             return None
-        spatial_tokens = seq_len // frame_count
         token_valid = (~key_padding_mask).bool()
         frame_valid = token_valid.view(token_valid.size(0), frame_count, spatial_tokens).any(dim=-1)
         # Count leading fully-invalid frames: exactly the front-padded demo frames.
@@ -266,6 +265,8 @@ class FramewiseSelfAttention(nn.Module):
         x: torch.Tensor,
         *,
         frame_index_per_token: torch.Tensor,
+        frame_count: Optional[int] = None,
+        spatial_tokens_per_frame: Optional[int] = None,
         y_index_per_token: Optional[torch.Tensor] = None,
         x_index_per_token: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
@@ -290,9 +291,16 @@ class FramewiseSelfAttention(nn.Module):
             front_pad_frames = None
             key_padding_for_block = key_padding_mask if self.mask_padding_tokens else None
             if key_padding_for_block is not None:
+                local_frame_count = frame_count
+                local_spatial_tokens = spatial_tokens_per_frame
+                if local_frame_count is None or local_spatial_tokens is None:
+                    # Fallback for legacy callers: infer from static token index layout.
+                    local_frame_count = int(frame_index_per_token[-1].item()) + 1
+                    local_spatial_tokens = seq_len // max(local_frame_count, 1)
                 front_pad_frames = self._infer_front_pad_frames(
-                    frame_index_per_token=frame_index_per_token,
                     key_padding_mask=key_padding_for_block,
+                    frame_count=int(local_frame_count),
+                    spatial_tokens=int(local_spatial_tokens),
                 )
             need_block_mask = self.causal or (front_pad_frames is not None) or (key_padding_for_block is not None)
             block_mask = None
@@ -366,6 +374,8 @@ class FramewiseTransformerBlock(nn.Module):
         x: torch.Tensor,
         *,
         frame_index_per_token: torch.Tensor,
+        frame_count: Optional[int] = None,
+        spatial_tokens_per_frame: Optional[int] = None,
         y_index_per_token: Optional[torch.Tensor] = None,
         x_index_per_token: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
@@ -373,6 +383,8 @@ class FramewiseTransformerBlock(nn.Module):
         x = x + self.attn(
             self.norm1(x),
             frame_index_per_token=frame_index_per_token,
+            frame_count=frame_count,
+            spatial_tokens_per_frame=spatial_tokens_per_frame,
             y_index_per_token=y_index_per_token,
             x_index_per_token=x_index_per_token,
             key_padding_mask=key_padding_mask,
@@ -599,6 +611,8 @@ class ARCFlowViT(nn.Module):
                     encoded = layer(
                         encoded,
                         frame_index_per_token=frame_index_per_token,
+                        frame_count=frames,
+                        spatial_tokens_per_frame=self.spatial_tokens,
                         y_index_per_token=y_index_per_token,
                         x_index_per_token=x_index_per_token,
                         key_padding_mask=key_padding_mask,
