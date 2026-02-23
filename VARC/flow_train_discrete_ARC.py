@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
         "--include-rearc",
         nargs="?",
         const=True,
-        default=True,
+        default=False,
         type=parse_optional_bool,
         help="Add tasks from the RE-ARC dataset to the flow training set.",
     )
@@ -284,7 +284,7 @@ def parse_args() -> argparse.Namespace:
         "--include-barc",
         nargs="?",
         const=True,
-        default=True,
+        default=False,
         type=parse_optional_bool,
         help="Add tasks from the BARC dataset to the flow training set.",
     )
