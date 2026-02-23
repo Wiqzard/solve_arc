@@ -53,6 +53,10 @@ command:
   - evaluation
   - --max-demos
   - "10"
+  - --patch-size
+  - "2"
+  - --n-loops
+  - "1"
   - --num-colors
   - "12"
   - --mlp-ratio
@@ -60,15 +64,21 @@ command:
   - --dropout
   - "0.0"
   - --framewise-causal-attention
+  - "true"
+  - --mask-pad-attention
+  - "true"
+  - --mask-intra-frame-pad-attention
+  - "false"
   - --rope-3d
+  - "true"
   - --rope-base
   - "256.0"
   - --flow-train-resolution-aug
   - --flow-train-translation-aug
   - --batch-size
-  - "4"
+  - "8"
   - --eval-batch-size
-  - "4"
+  - "8"
   - --num-workers
   - "8"
   - --log-every-steps
@@ -76,7 +86,9 @@ command:
   - --eval-every-steps
   - "500"
   - --epochs
-  - "1"
+  - "20"
+  - --nested-dropout
+  - "true"
   - --learning-rate
   - "3e-4"
   - --lr-scheduler
@@ -95,12 +107,14 @@ command:
   - sample
   - --sample-steps
   - "40"
+  - --discrete-scheduler
+  - "cosine"
   - --include-rearc
   - --rearc-limit
-  - "150000"
+  - "-1"
   - --include-barc
   - --barc-limit
-  - "50000"
+  - "-1"
   - --bf16-autocast
   - --compile
   - --use-wandb
@@ -110,4 +124,8 @@ command:
   - "8"
   - --wandb-vis-scale
   - "8"
+  - --wandb-train-vis-every-steps
+  - "500"
+  - --wandb-train-vis-samples
+  - "2"
   - ${args}

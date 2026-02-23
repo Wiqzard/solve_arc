@@ -56,6 +56,10 @@ command:
   - "10"
   - --image-size
   - "32"
+  - --patch-size
+  - "2"
+  - --n-loops
+  - "1"
   - --num-colors
   - "12"
   - --embed-dim
@@ -69,12 +73,17 @@ command:
   - --dropout
   - "0.0"
   - --framewise-causal-attention
+  - "true"
+  - --mask-pad-attention
+  - "true"
+  - --mask-intra-frame-pad-attention
+  - "false"
   - --attention-backend
   - auto
   - --batch-size
-  - "4"
+  - "8"
   - --eval-batch-size
-  - "4"
+  - "8"
   - --num-workers
   - "8"
   - --log-every-steps
@@ -82,8 +91,9 @@ command:
   - --eval-every-steps
   - "500"
   - --epochs
-  - "1"
+  - "20"
   - --nested-dropout
+  - "true"
   - --learning-rate
   - "3e-4"
   - --lr-scheduler
@@ -106,10 +116,10 @@ command:
   - "40"
   - --include-rearc
   - --rearc-limit
-  - "15000"
+  - "-1"
   - --include-barc
   - --barc-limit
-  - "500"
+  - "-1"
   - --flow-train-resolution-aug
   - --flow-train-translation-aug
   - --bf16-autocast
@@ -121,4 +131,8 @@ command:
   - "8"
   - --wandb-vis-scale
   - "8"
+  - --wandb-train-vis-every-steps
+  - "500"
+  - --wandb-train-vis-samples
+  - "2"
   - ${args}
