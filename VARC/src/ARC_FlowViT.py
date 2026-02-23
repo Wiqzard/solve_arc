@@ -79,6 +79,8 @@ class FramewiseSelfAttention(nn.Module):
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_dropout = nn.Dropout(dropout)
         self._warned_flex_fallback = False
+        self._warned_flex_block_mask_oom = False
+        self._disable_flex_block_mask = False
 
     def _resolve_backend(self, x: torch.Tensor) -> str:
         if self.attention_backend == "sdpa":
@@ -236,11 +238,27 @@ class FramewiseSelfAttention(nn.Module):
 
         backend = self._resolve_backend(x)
         if backend == "flex":
-            block_mask = self._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
+            block_mask = None
+            if self.causal and not self._disable_flex_block_mask:
+                try:
+                    block_mask = self._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
+                except torch.OutOfMemoryError:
+                    self._disable_flex_block_mask = True
+                    if not self._warned_flex_block_mask_oom:
+                        print(
+                            "Warning: OOM while creating flex block mask; "
+                            "falling back to score_mod causal masking for this layer."
+                        )
+                        self._warned_flex_block_mask_oom = True
+                    if x.is_cuda:
+                        torch.cuda.empty_cache()
             score_mod = None
-            if key_padding_mask is not None and self.mask_padding_tokens:
-                key_valid = (~key_padding_mask).to(device=x.device, dtype=torch.bool)
+            if (self.mask_padding_tokens and key_padding_mask is not None) or (self.causal and block_mask is None):
                 min_value = torch.finfo(q.dtype).min
+                frame_ids = frame_index_per_token
+                key_valid = None
+                if self.mask_padding_tokens and key_padding_mask is not None:
+                    key_valid = (~key_padding_mask).to(device=x.device, dtype=torch.bool)
 
                 def score_mod(
                     score: torch.Tensor,
@@ -250,7 +268,11 @@ class FramewiseSelfAttention(nn.Module):
                     kv_idx: torch.Tensor,
                 ) -> torch.Tensor:
                     del head_idx
-                    keep = key_valid[batch_idx, q_idx] & key_valid[batch_idx, kv_idx]
+                    keep = torch.ones_like(score, dtype=torch.bool)
+                    if key_valid is not None:
+                        keep = keep & key_valid[batch_idx, q_idx] & key_valid[batch_idx, kv_idx]
+                    if self.causal and block_mask is None:
+                        keep = keep & (frame_ids[q_idx] >= frame_ids[kv_idx])
                     return torch.where(keep, score, min_value)
 
             context = flex_attention(q, k, v, block_mask=block_mask, score_mod=score_mod)
@@ -457,8 +479,19 @@ class ARCFlowViT(nn.Module):
             if attn is None:
                 continue
             backend = attn._resolve_backend(probe_x)
-            if backend == "flex":
-                attn._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
+            if backend == "flex" and attn.causal and not attn._disable_flex_block_mask:
+                try:
+                    attn._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
+                except torch.OutOfMemoryError:
+                    attn._disable_flex_block_mask = True
+                    if not attn._warned_flex_block_mask_oom:
+                        print(
+                            "Warning: OOM while priming flex block mask; "
+                            "using score_mod causal masking fallback for this layer."
+                        )
+                        attn._warned_flex_block_mask_oom = True
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
 
     def forward(
         self,
