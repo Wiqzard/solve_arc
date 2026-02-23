@@ -177,7 +177,7 @@ class FramewiseSelfAttention(nn.Module):
             H=None,
             Q_LEN=seq_len,
             KV_LEN=seq_len,
-            compile=True,
+            _compile=True,
             device=frame_index_per_token.device,
         )
         if cache_key is not None:
