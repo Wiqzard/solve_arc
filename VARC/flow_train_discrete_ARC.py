@@ -151,11 +151,11 @@ def parse_args() -> argparse.Namespace:
         "--num-demos",
         dest="max_demos",
         type=int,
-        default=3,
+        default=10,
         help="Maximum number of demonstration pairs (m) in the context.",
     )
-    parser.add_argument("--image-size", type=int, default=30)
-    parser.add_argument("--patch-size", type=int, default=1, help="Patch size for ARCFlowViT tokenization.")
+    parser.add_argument("--image-size", type=int, default=32)
+    parser.add_argument("--patch-size", type=int, default=2, help="Patch size for ARCFlowViT tokenization.")
     parser.add_argument("--num-colors", type=int, default=12)
 
     parser.add_argument("--embed-dim", type=int, default=512)
@@ -170,17 +170,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-loops",
         type=int,
-        default=2,
+        default=1,
         help="Number of repeated passes through the full layer stack (used by flow_vit_looped).",
     )
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument(
         "--framewise-causal-attention",
         nargs="?",
         const=True,
-        default=False,
+        default=True,
         type=parse_optional_bool,
         help="Enable framewise causal attention (frame f attends only to frames <= f).",
     )
@@ -193,7 +193,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mask-pad-attention",
-        default=False,
+        default=True,
         nargs="?",
         const=True,
         type=parse_optional_bool,
@@ -217,7 +217,7 @@ def parse_args() -> argparse.Namespace:
         "--rope-3d",
         nargs="?",
         const=True,
-        default=False,
+        default=True,
         type=parse_optional_bool,
         help="Enable 3D RoPE (frame,y,x) on attention q/k.",
     )
@@ -228,9 +228,9 @@ def parse_args() -> argparse.Namespace:
         help="Base frequency for 3D RoPE.",
     )
 
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--eval-batch-size", type=int, default=8)
-    parser.add_argument("--log-every-steps", type=int, default=50)
+    parser.add_argument("--log-every-steps", type=int, default=5)
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -238,14 +238,21 @@ def parse_args() -> argparse.Namespace:
         help="Enable detailed training prints in addition to tqdm bars.",
     )
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--lr-scheduler", type=str, default="cosine", choices=("cosine", "none"))
     parser.add_argument("--min-learning-rate", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--compile", action="store_true", help="Enable torch.compile optimization.")
+    parser.add_argument(
+        "--compile",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
+        help="Enable torch.compile optimization.",
+    )
     parser.add_argument(
         "--compile-mode",
         type=str,
@@ -255,7 +262,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-rearc",
-        action="store_true",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
         help="Add tasks from the RE-ARC dataset to the flow training set.",
     )
     parser.add_argument(
@@ -272,7 +282,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-barc",
-        action="store_true",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
         help="Add tasks from the BARC dataset to the flow training set.",
     )
     parser.add_argument(
@@ -290,22 +303,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ddp", action="store_true", help="Enable DDP training (torchrun).")
     parser.add_argument("--dist-backend", type=str, default="nccl", choices=("nccl", "gloo"))
     parser.add_argument("--dist-url", type=str, default="env://")
-    parser.add_argument("--bf16-autocast", action="store_true", help="Enable bfloat16 autocast on CUDA.")
+    parser.add_argument(
+        "--bf16-autocast",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
+        help="Enable bfloat16 autocast on CUDA.",
+    )
     parser.add_argument(
         "--flow-train-translation-aug",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
         help="Enable random translation augmentation for flow train episodes.",
     )
     parser.add_argument(
         "--flow-train-resolution-aug",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
         help="Enable random resolution scaling augmentation for flow train episodes.",
     )
     parser.add_argument(
         "--nested-dropout",
-        default=False,
+        default=True,
         nargs="?",
         const=True,
         type=parse_optional_bool,
@@ -337,7 +361,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--discrete-scheduler",
         type=str,
-        default="exponential",
+        default="cosine",
         choices=("exponential", "condot", "polynomial", "vp", "linear_vp", "cosine"),
         help="Scheduler used by MixtureDiscreteProbPath during training and sampling.",
     )
@@ -371,7 +395,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-every-steps",
         type=int,
-        default=0,
+        default=500,
         help="If > 0, run evaluation every N optimizer steps (disables epoch-based eval).",
     )
     parser.add_argument("--sample-steps", type=int, default=40, help="Discrete Euler steps for last-frame generation.")
@@ -385,7 +409,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_last.pt")
     parser.add_argument("--best-save-path", type=str, default="saves/flow_context_vit_discrete/checkpoint_best.pt")
 
-    parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument(
+        "--use-wandb",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_optional_bool,
+    )
     parser.add_argument("--wandb-project", type=str, default="VisionARC")
     parser.add_argument("--wandb-run-name", type=str, default="flow-context-vit-discrete")
     parser.add_argument(
@@ -403,7 +433,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wandb-train-vis-every-steps",
         type=int,
-        default=0,
+        default=500,
         help="If > 0, log training-step visualizations every N optimizer steps.",
     )
     parser.add_argument(
