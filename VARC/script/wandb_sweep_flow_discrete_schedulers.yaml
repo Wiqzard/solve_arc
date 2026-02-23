@@ -81,9 +81,9 @@ command:
   - --attention-backend
   - auto
   - --batch-size
-  - "8"
+  - "4"
   - --eval-batch-size
-  - "8"
+  - "4"
   - --num-workers
   - "8"
   - --log-every-steps
@@ -117,7 +117,7 @@ command:
   - --include-rearc
   - --rearc-limit
   - "-1"
-  - --include-barc
+  #- --include-barc
   - --barc-limit
   - "-1"
   - --flow-train-resolution-aug

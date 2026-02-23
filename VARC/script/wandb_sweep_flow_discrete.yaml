@@ -12,14 +12,10 @@ metric:
 parameters:
   #learning-rate:
   #  values: [0.0003, 0.0001]
-  patch-size:
-    value: 2
   rope-3d:
     values: [false, true]
   image-size:
     values: [32, 48]
-   # values: [32]
-    #values: [32, 64]
   depth:
     values: [4, 8, 16, 24, 32]
   embed-dim:
@@ -28,6 +24,7 @@ parameters:
     values: [8, 12, 16, 32]
   nested-dropout:
     values: [false, true]
+    
   #batch-size:
   #  values: [4, 8, 16, 32]
   #rope-base:
@@ -76,9 +73,9 @@ command:
   - --flow-train-resolution-aug
   - --flow-train-translation-aug
   - --batch-size
-  - "8"
+  - "4"
   - --eval-batch-size
-  - "8"
+  - "4"
   - --num-workers
   - "8"
   - --log-every-steps
@@ -112,7 +109,7 @@ command:
   - --include-rearc
   - --rearc-limit
   - "-1"
-  - --include-barc
+  #- --include-barc
   - --barc-limit
   - "-1"
   - --bf16-autocast
