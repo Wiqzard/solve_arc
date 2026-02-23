@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import math
 from typing import Any, Dict, Optional
 
@@ -9,7 +10,6 @@ from torch import nn
 
 try:
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-    flex_attention = torch.compile(flex_attention)
     FLEX_ATTENTION_AVAILABLE = True
 except ImportError:
     create_block_mask = None
@@ -39,7 +39,8 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class FramewiseSelfAttention(nn.Module):
-    _GLOBAL_FLEX_BLOCK_MASK_CACHE: Dict[tuple[int, str, bool], Any] = {}
+    _GLOBAL_FLEX_BLOCK_MASK_CACHE: "OrderedDict[tuple[Any, ...], Any]" = OrderedDict()
+    _GLOBAL_FLEX_BLOCK_MASK_CACHE_MAX = 256
 
     def __init__(
         self,
@@ -124,16 +125,22 @@ class FramewiseSelfAttention(nn.Module):
         self,
         *,
         frame_index_per_token: torch.Tensor,
+        front_pad_frames: Optional[torch.Tensor] = None,
     ) -> Any:
         if create_block_mask is None:
             raise RuntimeError("torch flex_attention is unavailable.")
         seq_len = int(frame_index_per_token.numel())
-        cache_key = (seq_len, str(frame_index_per_token.device), self.causal)
+        pad_signature: Optional[tuple[int, ...]] = None
+        if front_pad_frames is not None:
+            pad_signature = tuple(int(v) for v in front_pad_frames.detach().cpu().tolist())
+        cache_key = (seq_len, str(frame_index_per_token.device), self.causal, pad_signature)
         cached = FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.get(cache_key)
         if cached is not None:
+            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
             return cached
 
         frame_ids = frame_index_per_token
+        front_pad_local = None if front_pad_frames is None else front_pad_frames.to(device=frame_ids.device, dtype=torch.long)
 
         def framewise_causal_mask(
             batch_idx: torch.Tensor,
@@ -141,21 +148,51 @@ class FramewiseSelfAttention(nn.Module):
             q_idx: torch.Tensor,
             kv_idx: torch.Tensor,
         ) -> torch.Tensor:
-            del batch_idx, head_idx
+            del head_idx
             if not self.causal:
-                return torch.ones_like(q_idx, dtype=torch.bool)
-            return frame_ids[q_idx] >= frame_ids[kv_idx]
+                keep = torch.ones_like(q_idx, dtype=torch.bool)
+            else:
+                keep = frame_ids[q_idx] >= frame_ids[kv_idx]
+            if front_pad_local is not None:
+                b = batch_idx
+                qf = frame_ids[q_idx]
+                kf = frame_ids[kv_idx]
+                keep = keep & (qf >= front_pad_local[b]) & (kf >= front_pad_local[b])
+            return keep
 
         block_mask = create_block_mask(
             framewise_causal_mask,
-            B=None,
+            B=None if front_pad_local is None else int(front_pad_local.numel()),
             H=None,
             Q_LEN=seq_len,
             KV_LEN=seq_len,
+            compile=True,
             device=frame_index_per_token.device,
         )
         FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE[cache_key] = block_mask
+        FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
+        if len(FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE) > FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE_MAX:
+            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.popitem(last=False)
         return block_mask
+
+    def _infer_front_pad_frames(
+        self,
+        *,
+        frame_index_per_token: torch.Tensor,
+        key_padding_mask: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if key_padding_mask is None:
+            return None
+        frame_count = int(frame_index_per_token.max().item()) + 1
+        seq_len = int(frame_index_per_token.numel())
+        if frame_count <= 0 or seq_len % frame_count != 0:
+            return None
+        spatial_tokens = seq_len // frame_count
+        token_valid = (~key_padding_mask).bool()
+        frame_valid = token_valid.view(token_valid.size(0), frame_count, spatial_tokens).any(dim=-1)
+        # Count leading fully-invalid frames: exactly the front-padded demo frames.
+        leading_invalid = torch.cumprod((~frame_valid).long(), dim=1).sum(dim=1)
+        return leading_invalid.to(dtype=torch.long, device=key_padding_mask.device)
 
     def _rotary_cos_sin(self, position_ids: torch.Tensor, *, half_dim: int, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         freq_idx = torch.arange(half_dim, device=position_ids.device, dtype=torch.float32)
@@ -238,42 +275,63 @@ class FramewiseSelfAttention(nn.Module):
 
         backend = self._resolve_backend(x)
         if backend == "flex":
+            front_pad_frames = None
+            if self.mask_padding_tokens and key_padding_mask is not None:
+                front_pad_frames = self._infer_front_pad_frames(
+                    frame_index_per_token=frame_index_per_token,
+                    key_padding_mask=key_padding_mask,
+                )
             block_mask = None
-            if self.causal and not self._disable_flex_block_mask:
+            need_block_mask = (self.causal or front_pad_frames is not None) and (not self._disable_flex_block_mask)
+            if need_block_mask:
                 try:
-                    block_mask = self._get_flex_block_mask(frame_index_per_token=frame_index_per_token)
+                    block_mask = self._get_flex_block_mask(
+                        frame_index_per_token=frame_index_per_token,
+                        front_pad_frames=front_pad_frames,
+                    )
                 except torch.OutOfMemoryError:
                     self._disable_flex_block_mask = True
                     if not self._warned_flex_block_mask_oom:
                         print(
                             "Warning: OOM while creating flex block mask; "
-                            "falling back to score_mod causal masking for this layer."
+                            "falling back to score_mod masking for this layer."
                         )
                         self._warned_flex_block_mask_oom = True
                     if x.is_cuda:
                         torch.cuda.empty_cache()
+
             score_mod = None
             if (self.mask_padding_tokens and key_padding_mask is not None) or (self.causal and block_mask is None):
                 min_value = torch.finfo(q.dtype).min
-                frame_ids = frame_index_per_token
-                key_valid = None
-                if self.mask_padding_tokens and key_padding_mask is not None:
-                    key_valid = (~key_padding_mask).to(device=x.device, dtype=torch.bool)
+                frame_ids = frame_index_per_token.to(device=x.device)
+                residual_valid = None
+                if front_pad_frames is not None:
+                    front_pad_token_mask = frame_ids.unsqueeze(0) < front_pad_frames.to(device=x.device).unsqueeze(1)
+                    # Front-padded frames are already masked by block_mask; score_mod handles only non-front token padding.
+                    residual_invalid = key_padding_mask.to(device=x.device, dtype=torch.bool) & (~front_pad_token_mask)
+                    residual_valid = ~residual_invalid
+                elif self.mask_padding_tokens and key_padding_mask is not None:
+                    residual_valid = (~key_padding_mask).to(device=x.device, dtype=torch.bool)
 
-                def score_mod(
-                    score: torch.Tensor,
-                    batch_idx: torch.Tensor,
-                    head_idx: torch.Tensor,
-                    q_idx: torch.Tensor,
-                    kv_idx: torch.Tensor,
-                ) -> torch.Tensor:
-                    del head_idx
-                    keep = torch.ones_like(score, dtype=torch.bool)
-                    if key_valid is not None:
-                        keep = keep & key_valid[batch_idx, q_idx] & key_valid[batch_idx, kv_idx]
-                    if self.causal and block_mask is None:
-                        keep = keep & (frame_ids[q_idx] >= frame_ids[kv_idx])
-                    return torch.where(keep, score, min_value)
+                need_score_mod = (self.causal and block_mask is None) or (
+                    residual_valid is not None and (not bool(residual_valid.all().item()))
+                )
+                if need_score_mod:
+
+                    def score_mod(
+                        score: torch.Tensor,
+                        batch_idx: torch.Tensor,
+                        head_idx: torch.Tensor,
+                        q_idx: torch.Tensor,
+                        kv_idx: torch.Tensor,
+                    ) -> torch.Tensor:
+                        del head_idx
+                        keep = torch.ones_like(score, dtype=torch.bool)
+                        if residual_valid is not None:
+                            keep = keep & residual_valid[batch_idx, q_idx] & residual_valid[batch_idx, kv_idx]
+                        if self.causal and block_mask is None:
+                            keep = keep & (frame_ids[q_idx] >= frame_ids[kv_idx])
+                        return torch.where(keep, score, min_value)
 
             context = flex_attention(q, k, v, block_mask=block_mask, score_mod=score_mod)
         else:
