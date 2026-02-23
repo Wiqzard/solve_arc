@@ -124,18 +124,22 @@ class FramewiseSelfAttention(nn.Module):
         *,
         frame_index_per_token: torch.Tensor,
         front_pad_frames: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Any:
         if create_block_mask is None:
             raise RuntimeError("torch flex_attention is unavailable.")
         seq_len = int(frame_index_per_token.numel())
+        key_padding_local = None if key_padding_mask is None else key_padding_mask.to(device=frame_index_per_token.device, dtype=torch.bool)
+        cacheable = key_padding_local is None
         pad_signature: Optional[tuple[int, ...]] = None
         if front_pad_frames is not None:
             pad_signature = tuple(int(v) for v in front_pad_frames.detach().cpu().tolist())
-        cache_key = (seq_len, str(frame_index_per_token.device), self.causal, pad_signature)
-        cached = FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.get(cache_key)
-        if cached is not None:
-            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
-            return cached
+        cache_key = (seq_len, str(frame_index_per_token.device), self.causal, pad_signature) if cacheable else None
+        if cache_key is not None:
+            cached = FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.get(cache_key)
+            if cached is not None:
+                FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
+                return cached
 
         frame_ids = frame_index_per_token
         front_pad_local = None if front_pad_frames is None else front_pad_frames.to(device=frame_ids.device, dtype=torch.long)
@@ -156,21 +160,30 @@ class FramewiseSelfAttention(nn.Module):
                 qf = frame_ids[q_idx]
                 kf = frame_ids[kv_idx]
                 keep = keep & (qf >= front_pad_local[b]) & (kf >= front_pad_local[b])
+            if key_padding_local is not None:
+                b = batch_idx
+                keep = keep & (~key_padding_local[b, q_idx]) & (~key_padding_local[b, kv_idx])
             return keep
 
+        batch_dim = None
+        if front_pad_local is not None:
+            batch_dim = int(front_pad_local.numel())
+        if key_padding_local is not None:
+            batch_dim = int(key_padding_local.size(0))
         block_mask = create_block_mask(
             framewise_causal_mask,
-            B=None if front_pad_local is None else int(front_pad_local.numel()),
+            B=batch_dim,
             H=None,
             Q_LEN=seq_len,
             KV_LEN=seq_len,
             compile=True,
             device=frame_index_per_token.device,
         )
-        FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE[cache_key] = block_mask
-        FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
-        if len(FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE) > FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE_MAX:
-            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.popitem(last=False)
+        if cache_key is not None:
+            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE[cache_key] = block_mask
+            FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.move_to_end(cache_key)
+            if len(FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE) > FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE_MAX:
+                FramewiseSelfAttention._GLOBAL_FLEX_BLOCK_MASK_CACHE.popitem(last=False)
         return block_mask
 
     def _infer_front_pad_frames(
@@ -274,17 +287,19 @@ class FramewiseSelfAttention(nn.Module):
         backend = self._resolve_backend(x)
         if backend == "flex":
             front_pad_frames = None
-            if self.mask_padding_tokens and key_padding_mask is not None:
+            key_padding_for_block = key_padding_mask if self.mask_padding_tokens else None
+            if key_padding_for_block is not None:
                 front_pad_frames = self._infer_front_pad_frames(
                     frame_index_per_token=frame_index_per_token,
-                    key_padding_mask=key_padding_mask,
+                    key_padding_mask=key_padding_for_block,
                 )
-            need_block_mask = self.causal or (front_pad_frames is not None)
+            need_block_mask = self.causal or (front_pad_frames is not None) or (key_padding_for_block is not None)
             block_mask = None
             if need_block_mask:
                 block_mask = self._get_flex_block_mask(
                     frame_index_per_token=frame_index_per_token,
                     front_pad_frames=front_pad_frames,
+                    key_padding_mask=key_padding_for_block,
                 )
             context = flex_attention(q, k, v, block_mask=block_mask, score_mod=None)
         else:
