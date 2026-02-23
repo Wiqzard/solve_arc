@@ -11,6 +11,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
+IGNORE_INDEX = 10
+PAD_INDEX = 11
+
 
 def _grid_shape(grid: Sequence[Sequence[int]]) -> Tuple[int, int]:
     height = len(grid)
@@ -48,6 +51,11 @@ class ARCContextFlowDataset(Dataset):
         self.max_demos = max_demos
         self.image_size = image_size
         self.num_colors = num_colors
+        if self.num_colors <= PAD_INDEX:
+            raise ValueError(
+                f"num_colors must be >= {PAD_INDEX + 1} to match offline color semantics "
+                f"(IGNORE={IGNORE_INDEX}, PAD={PAD_INDEX}); got {self.num_colors}."
+            )
         self.seed = seed
         self.translation_augmentation = translation_augmentation
         self.resolution_augmentation = resolution_augmentation
@@ -141,7 +149,13 @@ class ARCContextFlowDataset(Dataset):
     def _is_valid_example(self, example: Dict[str, Any]) -> bool:
         if "input" not in example or "output" not in example:
             return False
-        return self._is_valid_grid(example["input"]) and self._is_valid_grid(example["output"])
+        if not self._is_valid_grid(example["input"]) or not self._is_valid_grid(example["output"]):
+            return False
+        output_h, output_w = _grid_shape(example["output"])
+        # Output frames add an explicit border token (+1 row/col), like offline_train.
+        if output_h + 1 > self.image_size or output_w + 1 > self.image_size:
+            return False
+        return True
 
     def _pad_grid(
         self,
@@ -149,13 +163,18 @@ class ARCContextFlowDataset(Dataset):
         *,
         x_offset: int = 0,
         y_offset: int = 0,
+        output_shape: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        canvas = torch.zeros((self.image_size, self.image_size), dtype=torch.long)
+        canvas = torch.full((self.image_size, self.image_size), IGNORE_INDEX, dtype=torch.long)
         mask = torch.zeros((self.image_size, self.image_size), dtype=torch.bool)
         array = torch.tensor(grid, dtype=torch.long)
         height, width = array.shape
         canvas[y_offset : y_offset + height, x_offset : x_offset + width] = array
         mask[y_offset : y_offset + height, x_offset : x_offset + width] = True
+        if output_shape:
+            canvas[y_offset : y_offset + height, x_offset + width] = PAD_INDEX
+            canvas[y_offset + height, x_offset : x_offset + width + 1] = PAD_INDEX
+            mask[y_offset : y_offset + height + 1, x_offset : x_offset + width + 1] = True
         return canvas, mask
 
     def _augment_example_pair(
@@ -166,26 +185,36 @@ class ARCContextFlowDataset(Dataset):
     ) -> Dict[str, List[List[int]]]:
         input_grid = np.asarray(example["input"], dtype=np.int64)
         output_grid = np.asarray(example["output"], dtype=np.int64)
-        max_cur_y = max(input_grid.shape[0], output_grid.shape[0])
-        max_cur_x = max(input_grid.shape[1], output_grid.shape[1])
+        input_h, input_w = int(input_grid.shape[0]), int(input_grid.shape[1])
+        output_h, output_w = int(output_grid.shape[0]), int(output_grid.shape[1])
 
         scale_factor = 1
         if self.mode == "train" and self.resolution_augmentation:
-            max_len = max(max_cur_x, max_cur_y)
-            max_scale_factor = max(self.image_size // max_len, 1)
+            # Match offline semantics:
+            # - inputs must fit as-is
+            # - outputs reserve one extra border token (+1 row/col)
+            max_scale_from_input = min(
+                self.image_size // max(input_h, 1),
+                self.image_size // max(input_w, 1),
+            )
+            max_scale_from_output = min(
+                (self.image_size - 1) // max(output_h, 1),
+                (self.image_size - 1) // max(output_w, 1),
+            )
+            max_scale_factor = max(min(max_scale_from_input, max_scale_from_output), 1)
             scale_factor = int(rng.randint(1, max_scale_factor))
             if scale_factor > 1:
                 input_grid = np.repeat(np.repeat(input_grid, scale_factor, axis=0), scale_factor, axis=1)
                 output_grid = np.repeat(np.repeat(output_grid, scale_factor, axis=0), scale_factor, axis=1)
 
-        scaled_h = max_cur_y * scale_factor
-        scaled_w = max_cur_x * scale_factor
+        required_h = max(int(input_grid.shape[0]), int(output_grid.shape[0]) + 1)
+        required_w = max(int(input_grid.shape[1]), int(output_grid.shape[1]) + 1)
 
         x_offset = 0
         y_offset = 0
         if self.mode == "train" and self.translation_augmentation:
-            max_x_offset = max(self.image_size - scaled_w, 0)
-            max_y_offset = max(self.image_size - scaled_h, 0)
+            max_x_offset = max(self.image_size - required_w, 0)
+            max_y_offset = max(self.image_size - required_h, 0)
             x_offset = int(rng.randint(0, max_x_offset)) if max_x_offset > 0 else 0
             y_offset = int(rng.randint(0, max_y_offset)) if max_y_offset > 0 else 0
 
@@ -381,7 +410,7 @@ class ARCContextFlowDataset(Dataset):
         frame_masks: List[torch.Tensor] = []
 
         if pad_demo_count > 0:
-            pad_frame = torch.zeros((self.image_size, self.image_size), dtype=torch.long)
+            pad_frame = torch.full((self.image_size, self.image_size), IGNORE_INDEX, dtype=torch.long)
             pad_mask = torch.zeros((self.image_size, self.image_size), dtype=torch.bool)
             for _ in range(pad_demo_count):
                 frames.extend([pad_frame.clone(), pad_frame.clone()])
@@ -390,8 +419,18 @@ class ARCContextFlowDataset(Dataset):
         for demo_idx in demo_indices:
             demo = train_examples[demo_idx]
             aug_demo = self._augment_example_pair(demo, rng=rng)
-            x_frame, x_mask = self._pad_grid(aug_demo["input"], x_offset=aug_demo["x_offset"], y_offset=aug_demo["y_offset"])
-            y_frame, y_mask = self._pad_grid(aug_demo["output"], x_offset=aug_demo["x_offset"], y_offset=aug_demo["y_offset"])
+            x_frame, x_mask = self._pad_grid(
+                aug_demo["input"],
+                x_offset=aug_demo["x_offset"],
+                y_offset=aug_demo["y_offset"],
+                output_shape=False,
+            )
+            y_frame, y_mask = self._pad_grid(
+                aug_demo["output"],
+                x_offset=aug_demo["x_offset"],
+                y_offset=aug_demo["y_offset"],
+                output_shape=True,
+            )
             frames.extend([x_frame, y_frame])
             frame_masks.extend([x_mask, y_mask])
 
@@ -400,11 +439,13 @@ class ARCContextFlowDataset(Dataset):
             aug_query["input"],
             x_offset=aug_query["x_offset"],
             y_offset=aug_query["y_offset"],
+            output_shape=False,
         )
         query_output_frame, query_output_mask = self._pad_grid(
             aug_query["output"],
             x_offset=aug_query["x_offset"],
             y_offset=aug_query["y_offset"],
+            output_shape=True,
         )
         frames.extend([query_input_frame, query_output_frame])
         frame_masks.extend([query_input_mask, query_output_mask])
