@@ -155,6 +155,7 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of demonstration pairs (m) in the context.",
     )
     parser.add_argument("--image-size", type=int, default=30)
+    parser.add_argument("--patch-size", type=int, default=1, help="Patch size for ARCFlowViT tokenization.")
     parser.add_argument("--num-colors", type=int, default=12)
 
     parser.add_argument("--embed-dim", type=int, default=512)
@@ -1059,10 +1060,15 @@ def train(args: argparse.Namespace) -> None:
         world_size=world_size,
     )
     max_frames = 2 * args.num_demos + 2
-    context_length = 2 * args.num_demos * (args.image_size * args.image_size)
+    if args.image_size % args.patch_size != 0:
+        raise ValueError(
+            f"image-size ({args.image_size}) must be divisible by patch-size ({args.patch_size})."
+        )
+    tokens_per_frame = (args.image_size // args.patch_size) ** 2
+    context_length = 2 * args.num_demos * tokens_per_frame
     if is_main and args.verbose:
         print(f"Discrete flow context tokens (demo-only): {context_length}")
-        print(f"Full sequence tokens with query pair: {max_frames * (args.image_size * args.image_size)}")
+        print(f"Full sequence tokens with query pair: {max_frames * tokens_per_frame}")
         print(f"Train episodes: {len(train_dataset)}")
         if eval_dataset is not None:
             print(f"Eval episodes: {len(eval_dataset)}")
@@ -1073,6 +1079,7 @@ def train(args: argparse.Namespace) -> None:
         print(f"Model architecture: {args.model_arch} (n_loops={model_loops})")
     model = model_cls(
         image_size=args.image_size,
+        patch_size=args.patch_size,
         num_colors=args.num_colors,
         max_frames=max_frames,
         embed_dim=args.embed_dim,

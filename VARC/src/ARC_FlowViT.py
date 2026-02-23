@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
+from timm.models.vision_transformer import PatchEmbed
 
 try:
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -387,6 +388,7 @@ class ARCFlowViT(nn.Module):
         self,
         *,
         image_size: int,
+        patch_size: int = 1,
         num_colors: int,
         max_frames: int,
         embed_dim: int = 512,
@@ -403,10 +405,16 @@ class ARCFlowViT(nn.Module):
         rope_base: float = 10000.0,
     ) -> None:
         super().__init__()
+        if patch_size <= 0:
+            raise ValueError(f"patch_size must be > 0, got {patch_size}")
+        if image_size % patch_size != 0:
+            raise ValueError(f"image_size ({image_size}) must be divisible by patch_size ({patch_size}).")
         self.image_size = image_size
+        self.patch_size = patch_size
+        self.grid_size = image_size // patch_size
         self.num_colors = num_colors
         self.max_frames = max_frames
-        self.spatial_tokens = image_size * image_size
+        self.spatial_tokens = self.grid_size * self.grid_size
         self.embed_dim = embed_dim
         self.framewise_causal_attention = framewise_causal_attention
         self.mask_pad_tokens_in_attention = mask_pad_tokens_in_attention
@@ -424,13 +432,20 @@ class ARCFlowViT(nn.Module):
         )
 
         self.input_proj = nn.Linear(num_colors, embed_dim)
+        self.patch_embed = PatchEmbed(
+            img_size=image_size,
+            patch_size=patch_size,
+            in_chans=embed_dim,
+            embed_dim=embed_dim,
+            bias=True,
+        )
         self.frame_embed = nn.Embedding(max_frames, embed_dim)
         self.spatial_embed = nn.Parameter(torch.zeros(1, self.spatial_tokens, embed_dim))
         token_frame_index = torch.arange(max_frames, dtype=torch.long).repeat_interleave(self.spatial_tokens)
         self.register_buffer("token_frame_index", token_frame_index, persistent=False)
         token_spatial_index = torch.arange(self.spatial_tokens, dtype=torch.long).repeat(max_frames)
-        token_y_index = token_spatial_index // self.image_size
-        token_x_index = token_spatial_index % self.image_size
+        token_y_index = token_spatial_index // self.grid_size
+        token_x_index = token_spatial_index % self.grid_size
         self.register_buffer("token_y_index", token_y_index, persistent=False)
         self.register_buffer("token_x_index", token_x_index, persistent=False)
 
@@ -480,7 +495,7 @@ class ARCFlowViT(nn.Module):
                 ]
             )
         self.norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, num_colors)
+        self.head = nn.Linear(embed_dim, num_colors * (patch_size ** 2))
 
         self._reset_parameters()
 
@@ -532,8 +547,11 @@ class ARCFlowViT(nn.Module):
         if frame_times.shape != (batch_size, frames):
             raise ValueError(f"frame_times must be {(batch_size, frames)}")
 
-        tokens = x_t.reshape(batch_size, frames, self.spatial_tokens, self.num_colors)
-        tokens = self.input_proj(tokens)
+        pixel_tokens = self.input_proj(x_t)
+        patch_tokens = self.patch_embed(
+            pixel_tokens.reshape(batch_size * frames, height, width, self.embed_dim).permute(0, 3, 1, 2)
+        )
+        tokens = patch_tokens.reshape(batch_size, frames, self.spatial_tokens, self.embed_dim)
 
         frame_ids = torch.arange(frames, device=x_t.device, dtype=torch.long).view(1, frames, 1)
         tokens = tokens + self.frame_embed(frame_ids)
@@ -548,7 +566,17 @@ class ARCFlowViT(nn.Module):
         if frame_valid_mask is not None:
             if frame_valid_mask.shape != (batch_size, frames, height, width):
                 raise ValueError("frame_valid_mask shape mismatch")
-            frame_valid_tokens = frame_valid_mask.reshape(batch_size, frames, self.spatial_tokens).bool()
+            frame_valid_tokens = frame_valid_mask.bool()
+            frame_valid_tokens = frame_valid_tokens.reshape(
+                batch_size,
+                frames,
+                self.grid_size,
+                self.patch_size,
+                self.grid_size,
+                self.patch_size,
+            )
+            frame_valid_tokens = frame_valid_tokens.any(dim=3).any(dim=4)
+            frame_valid_tokens = frame_valid_tokens.reshape(batch_size, frames, self.spatial_tokens)
             if self.mask_intra_frame_pad_tokens_in_attention:
                 token_valid_for_attention = frame_valid_tokens
             elif self.mask_pad_tokens_in_attention:
@@ -579,7 +607,16 @@ class ARCFlowViT(nn.Module):
                     encoded = layer(encoded, src_key_padding_mask=key_padding_mask)
         encoded = self.norm(encoded)
         velocity = self.head(encoded)
-        velocity = velocity.reshape(batch_size, frames, height, width, self.num_colors)
+        velocity = velocity.reshape(
+            batch_size,
+            frames,
+            self.grid_size,
+            self.grid_size,
+            self.patch_size,
+            self.patch_size,
+            self.num_colors,
+        )
+        velocity = velocity.permute(0, 1, 2, 4, 3, 5, 6).reshape(batch_size, frames, height, width, self.num_colors)
         return velocity
 
 
@@ -590,6 +627,7 @@ class ARCFlowViTLooped(ARCFlowViT):
         self,
         *,
         image_size: int,
+        patch_size: int = 1,
         num_colors: int,
         max_frames: int,
         embed_dim: int = 512,
@@ -607,6 +645,7 @@ class ARCFlowViTLooped(ARCFlowViT):
     ) -> None:
         super().__init__(
             image_size=image_size,
+            patch_size=patch_size,
             num_colors=num_colors,
             max_frames=max_frames,
             embed_dim=embed_dim,
