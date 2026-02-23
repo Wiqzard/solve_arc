@@ -18,6 +18,7 @@ dataset_args=(
   #--barc-limit -1
   --max-demos 10
   --image-size 32
+  --patch-size 2
   --num-colors 12
   --flow-train-resolution-aug
   --flow-train-translation-aug

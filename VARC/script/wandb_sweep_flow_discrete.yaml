@@ -1,8 +1,8 @@
 program: flow_train_discrete_ARC.py
 method: random #bayes
 metric:
-  goal: minimize
-  name: eval/loss
+  goal: maximize
+  name: eval/sample_acc_at_95
 #early_terminate:
 #  type: hyperband
 #  min_iter: 3
@@ -12,6 +12,8 @@ metric:
 parameters:
   #learning-rate:
   #  values: [0.0003, 0.0001]
+  patch-size:
+    value: 2
   rope-3d:
     values: [false, true]
   image-size:
