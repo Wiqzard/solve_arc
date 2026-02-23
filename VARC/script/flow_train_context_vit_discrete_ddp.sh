@@ -2,7 +2,7 @@
 set -euo pipefail
 
 export OMP_NUM_THREADS=8
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 # -----------------------------------------------------------------------------
 # Distributed
@@ -25,7 +25,7 @@ dataset_args=(
   --num-colors 12
   --num-workers 8
   --include-rearc
-  --include-barc
+  #--include-barc
   --flow-train-translation-aug
   --flow-train-resolution-aug
   --rearc-path "raw_data/re_arc"
@@ -105,7 +105,7 @@ eval_args=(
 # -----------------------------------------------------------------------------
 wandb_args=(
   --use-wandb
-  --wandb-project "VisionARC"
+  --wandb-project "solve_arc-VARC"
   --wandb-run-name "flow-context-vit-discrete"
   --wandb-num-vis-samples 8
   --wandb-vis-scale 8

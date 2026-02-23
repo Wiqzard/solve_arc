@@ -19,12 +19,22 @@ parameters:
   depth:
     values: [4, 8, 16, 24, 32]
   embed-dim:
-    values: [384, 512, 768]
+    values: [384, 512, 768, 1024]
   num-heads:
     values: [8, 12, 16, 32]
+  max-demos:
+    values: [3, 6, 10]
   nested-dropout:
     values: [false, true]
-    
+  mask-intra-frame-pad-attention:
+    values: [false, true]
+  sample-steps:
+    values: [10, 40]
+  reverse-sampler:
+    values: [sample, argmax]
+  
+  #nested-dropout:
+  #  values: [false, true]
   #batch-size:
   #  values: [4, 8, 16, 32]
   #rope-base:
@@ -50,12 +60,20 @@ command:
   - evaluation
   - --max-demos
   - "10"
+  - --image-size
+  - "32"
   - --patch-size
   - "2"
   - --n-loops
   - "1"
   - --num-colors
   - "12"
+  - --embed-dim
+  - "512"
+  - --depth
+  - "10"
+  - --num-heads
+  - "8"
   - --mlp-ratio
   - "4.0"
   - --dropout
@@ -66,12 +84,8 @@ command:
   - "true"
   - --mask-intra-frame-pad-attention
   - "false"
-  - --rope-3d
-  - "true"
-  - --rope-base
-  - "256.0"
-  - --flow-train-resolution-aug
-  - --flow-train-translation-aug
+  - --attention-backend
+  - auto
   - --batch-size
   - "4"
   - --eval-batch-size
@@ -83,35 +97,37 @@ command:
   - --eval-every-steps
   - "500"
   - --epochs
-  - "20"
+  - "1"
   - --nested-dropout
   - "true"
   - --learning-rate
   - "3e-4"
   - --lr-scheduler
   - cosine
+  - --discrete-scheduler
+  - "cosine"
   - --discrete-rate
   - "5.0"
+  - --loss-function
+  - "cross_entropy"
   - --min-learning-rate
   - "1e-6"
   - --weight-decay
   - "0"
-  - --lr-scheduler
-  - cosine
-  - --attention-backend
-  - auto
+  - --train-time-discretization-steps
+  - "1000"
   - --reverse-sampler
   - sample
   - --sample-steps
   - "40"
-  - --discrete-scheduler
-  - "cosine"
   - --include-rearc
   - --rearc-limit
   - "-1"
   #- --include-barc
-  - --barc-limit
-  - "-1"
+  #- --barc-limit
+  #- "-1"
+  - --flow-train-resolution-aug
+  - --flow-train-translation-aug
   - --bf16-autocast
   - --compile
   - --use-wandb
