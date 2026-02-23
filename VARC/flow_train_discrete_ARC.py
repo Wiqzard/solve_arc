@@ -196,7 +196,21 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         const=True,
         type=parse_optional_bool,
-        help="Mask padded tokens in attention. For flex-causal attention, this is combined with framewise causal masking.",
+        help=(
+            "Mask front-padded demo frames in attention (kind 1). "
+            "For flex-causal attention, this is combined with framewise causal masking."
+        ),
+    )
+    parser.add_argument(
+        "--mask-intra-frame-pad-attention",
+        default=False,
+        nargs="?",
+        const=True,
+        type=parse_optional_bool,
+        help=(
+            "Additionally mask per-token padded cells inside non-empty frames (kind 2). "
+            "When enabled, this applies full token-level padding masks."
+        ),
     )
     parser.add_argument(
         "--rope-3d",
@@ -309,7 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss-function",
         type=str,
-        default="generalized_kl",
+        default="cross_entropy",
         choices=("cross_entropy", "generalized_kl"),
         help="Discrete flow-matching loss function (Meta-style selector).",
     )
@@ -1069,6 +1083,7 @@ def train(args: argparse.Namespace) -> None:
         dropout=args.dropout,
         framewise_causal_attention=args.framewise_causal_attention,
         mask_pad_tokens_in_attention=args.mask_pad_attention,
+        mask_intra_frame_pad_tokens_in_attention=args.mask_intra_frame_pad_attention,
         attention_backend=args.attention_backend,
         rope_3d=args.rope_3d,
         rope_base=args.rope_base,

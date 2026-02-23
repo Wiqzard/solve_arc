@@ -397,6 +397,7 @@ class ARCFlowViT(nn.Module):
         dropout: float = 0.1,
         framewise_causal_attention: bool = False,
         mask_pad_tokens_in_attention: bool = False,
+        mask_intra_frame_pad_tokens_in_attention: bool = False,
         attention_backend: str = "auto",
         rope_3d: bool = False,
         rope_base: float = 10000.0,
@@ -409,6 +410,7 @@ class ARCFlowViT(nn.Module):
         self.embed_dim = embed_dim
         self.framewise_causal_attention = framewise_causal_attention
         self.mask_pad_tokens_in_attention = mask_pad_tokens_in_attention
+        self.mask_intra_frame_pad_tokens_in_attention = mask_intra_frame_pad_tokens_in_attention
         self.attention_backend = attention_backend
         self.rope_3d = rope_3d
         self.rope_base = rope_base
@@ -417,6 +419,9 @@ class ARCFlowViT(nn.Module):
             raise ValueError(f"n_loops must be >= 1, got {n_loops}")
         self.n_loops = n_loops
         self.use_custom_attention_blocks = framewise_causal_attention or rope_3d
+        mask_padding_tokens_in_attention = (
+            mask_pad_tokens_in_attention or mask_intra_frame_pad_tokens_in_attention
+        )
 
         self.input_proj = nn.Linear(num_colors, embed_dim)
         self.frame_embed = nn.Embedding(max_frames, embed_dim)
@@ -451,7 +456,7 @@ class ARCFlowViT(nn.Module):
                         dropout=dropout,
                         attention_backend=attention_backend,
                         causal=framewise_causal_attention,
-                        mask_padding_tokens=mask_pad_tokens_in_attention,
+                        mask_padding_tokens=mask_padding_tokens_in_attention,
                         use_3d_rope=rope_3d,
                         rope_base=rope_base,
                     )
@@ -543,8 +548,16 @@ class ARCFlowViT(nn.Module):
         if frame_valid_mask is not None:
             if frame_valid_mask.shape != (batch_size, frames, height, width):
                 raise ValueError("frame_valid_mask shape mismatch")
-            if self.mask_pad_tokens_in_attention:
-                key_padding_mask = ~frame_valid_mask.reshape(batch_size, frames * self.spatial_tokens).bool()
+            frame_valid_tokens = frame_valid_mask.reshape(batch_size, frames, self.spatial_tokens).bool()
+            if self.mask_intra_frame_pad_tokens_in_attention:
+                token_valid_for_attention = frame_valid_tokens
+            elif self.mask_pad_tokens_in_attention:
+                frame_is_active = frame_valid_tokens.any(dim=-1, keepdim=True)
+                token_valid_for_attention = frame_is_active.expand(-1, -1, self.spatial_tokens)
+            else:
+                token_valid_for_attention = None
+            if token_valid_for_attention is not None:
+                key_padding_mask = ~token_valid_for_attention.reshape(batch_size, frames * self.spatial_tokens)
 
         base_time_embed = self.time_embed_base(frame_times.reshape(-1)).reshape(batch_size, frames, self.embed_dim)
         encoded = tokens
@@ -587,6 +600,7 @@ class ARCFlowViTLooped(ARCFlowViT):
         dropout: float = 0.1,
         framewise_causal_attention: bool = False,
         mask_pad_tokens_in_attention: bool = False,
+        mask_intra_frame_pad_tokens_in_attention: bool = False,
         attention_backend: str = "auto",
         rope_3d: bool = False,
         rope_base: float = 10000.0,
@@ -603,6 +617,7 @@ class ARCFlowViTLooped(ARCFlowViT):
             dropout=dropout,
             framewise_causal_attention=framewise_causal_attention,
             mask_pad_tokens_in_attention=mask_pad_tokens_in_attention,
+            mask_intra_frame_pad_tokens_in_attention=mask_intra_frame_pad_tokens_in_attention,
             attention_backend=attention_backend,
             rope_3d=rope_3d,
             rope_base=rope_base,
