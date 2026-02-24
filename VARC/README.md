@@ -423,6 +423,56 @@ Note:
 - The sweep template launches each trial with DDP (`torch.distributed.run`) on `8` GPUs and passes `--ddp`.
 - Therefore, run one W&B agent per node for this sweep template.
 
+### 9. Pretraining discrete flow matching on 2D cellular automata (CA-2D)
+This repo now includes a CA-2D pretraining path aligned with the data-generation strategy from [Edge of Chaos: Text Generation with One-Dimensional Cellular Automata](https://arxiv.org/abs/2410.02536), adapted from 1D CA language modeling to 2D grid prediction:
+
+- on-the-fly generated CA trajectories from random initial states
+- long rollouts (`1000` steps)
+- random spatiotemporal windows (random time + random spatial crop)
+- mixed prediction horizons (`1` and `5` steps)
+- heterogeneous dynamics (ordered / complex / chaotic life-like rule families)
+
+#### Generate CA-2D dataset (ARC JSON format)
+The generator writes tasks under `raw_data/CA-2D-DFM/data/{training,evaluation}/*.json`, compatible with `flow_train_discrete_ARC.py`.
+```bash
+python script/generate_ca_2d_dataset.py \
+  --output-root raw_data/CA-2D-DFM \
+  --num-train-tasks 2048 \
+  --num-eval-tasks 256 \
+  --train-examples-per-task 12 \
+  --test-examples-per-task 4 \
+  --sim-size 96 \
+  --crop-size 31 \
+  --rollout-steps 1000 \
+  --warmup-steps 60 \
+  --densities "0.15,0.25,0.35,0.45,0.55" \
+  --horizons "1,5" \
+  --rule-profile paper_like \
+  --overwrite
+```
+
+#### Local pretraining launcher
+```bash
+bash script/pretrain_discrete_ca2d.sh
+```
+
+#### UBELIX batch launcher (testbed and full runs)
+`script/pretrain_discrete_ca2d_ubelix.sbatch` uses explicit GPU partition/type/count:
+- `#SBATCH --partition=gpu`
+- `#SBATCH --gpus-per-node=h200:8`
+
+Submit:
+```bash
+ssh ss24i671@submit03.unibe.ch \
+  "cd ~/Documents/solve_agi/VARC && sbatch script/pretrain_discrete_ca2d_ubelix.sbatch"
+```
+
+Optional quick testbed override (short run):
+```bash
+ssh ss24i671@submit03.unibe.ch \
+  "cd ~/Documents/solve_agi/VARC && TRAIN_TASKS=128 EVAL_TASKS=32 TRAIN_EPOCHS=1 sbatch script/pretrain_discrete_ca2d_ubelix.sbatch"
+```
+
 ### Important hyperparameters
 
 #### Training hyperparmeters

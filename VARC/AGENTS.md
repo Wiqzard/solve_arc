@@ -11,3 +11,15 @@
 3. Prefer high-end GPU types when available (for example RTX 4090), while still requesting the maximum allocatable count.
 4. For interactive runs, use `srun` with explicit GPU type/count and request the maximum allowed count.
 5. For batch runs, use `sbatch` with explicit `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=<type>:<max_count>`.
+
+### UBELIX GPU capacity notes (queried on 2026-02-24 via `sinfo`)
+
+- `gpu:h200:8` (max `8` per node)
+- `gpu:h100:8` (max `8` per node)
+- `gpu:rtx4090:8` (max `8` per node)
+- `gpu:rtx3090:8` (max `8` per node)
+- `gpu:a100:6` (max `6` per node)
+
+Preferred default for new jobs in this repo:
+- high-end + max-count request: `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=h200:8`
+- if queue pressure is high, fallback to `h100:8`, then `rtx4090:8`
