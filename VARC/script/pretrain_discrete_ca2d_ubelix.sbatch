@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --gpus-per-node=h200:8
+#SBATCH --gpus-per-node=h100:1
 #SBATCH --time=08:00:00
 #SBATCH --output=outputs/ubelix_ca2d/slurm-%j.out
 

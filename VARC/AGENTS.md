@@ -21,5 +21,10 @@
 - `gpu:a100:6` (max `6` per node)
 
 Preferred default for new jobs in this repo:
-- high-end + max-count request: `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=h200:8`
+- partition-level high-end + max-count request: `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=h200:8`
 - if queue pressure is high, fallback to `h100:8`, then `rtx4090:8`
+
+### QoS-specific limits observed for user `ss24i671` (`job_gratis`)
+
+- per-job GPU limits: `h200=0`, `h100=1`, `rtx4090=2`, total `gpu<=3`
+- practical high-end default for this user: `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=h100:1`

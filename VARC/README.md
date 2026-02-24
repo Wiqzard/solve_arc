@@ -459,7 +459,7 @@ bash script/pretrain_discrete_ca2d.sh
 #### UBELIX batch launcher (testbed and full runs)
 `script/pretrain_discrete_ca2d_ubelix.sbatch` uses explicit GPU partition/type/count:
 - `#SBATCH --partition=gpu`
-- `#SBATCH --gpus-per-node=h200:8`
+- `#SBATCH --gpus-per-node=h100:1` (max high-end config allowed for current `job_gratis` QoS)
 
 Submit:
 ```bash
