@@ -346,6 +346,15 @@ def parse_args() -> argparse.Namespace:
         help="Apply discrete flow-matching loss only on the final solution frame.",
     )
     parser.add_argument(
+        "--split-context-moe-demo-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, enable split-context compositional MoE: split active demos into chunks of this size, "
+            "run one batched forward pass per chunk, and sum logits before computing loss."
+        ),
+    )
+    parser.add_argument(
         "--loss-function",
         type=str,
         default="cross_entropy",
@@ -743,6 +752,95 @@ def sample_xt_from_qt(
     return torch.where(valid, x_t, clean_tokens)
 
 
+def infer_active_demo_count(
+    *,
+    frame_valid_mask: torch.Tensor,
+    max_demos: int,
+) -> torch.Tensor:
+    if max_demos <= 0:
+        return torch.zeros(frame_valid_mask.size(0), device=frame_valid_mask.device, dtype=torch.long)
+    demo_valid = frame_valid_mask[:, : 2 * max_demos].bool()
+    demo_valid = demo_valid.view(frame_valid_mask.size(0), max_demos, 2, frame_valid_mask.size(2), frame_valid_mask.size(3))
+    active = demo_valid.any(dim=2).any(dim=2).any(dim=2).sum(dim=1)
+    return active.to(dtype=torch.long)
+
+
+def forward_with_split_context_moe(
+    model: ARCFlowViT,
+    x_t: torch.Tensor,
+    frame_times: torch.Tensor,
+    *,
+    frame_valid_mask: torch.Tensor,
+    active_demo_count: Optional[torch.Tensor],
+    max_demos: int,
+    split_demo_chunk_size: int,
+    autocast_enabled: bool,
+) -> torch.Tensor:
+    if split_demo_chunk_size <= 0 or max_demos <= 0:
+        cudagraph_step_begin_if_available()
+        with autocast_context(x_t.device, autocast_enabled):
+            return model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+
+    if frame_valid_mask.dim() != 4:
+        raise ValueError("frame_valid_mask must be (batch, frames, height, width).")
+    batch_size, frame_count, _, _ = frame_valid_mask.shape
+    expected_frames = 2 * max_demos + 2
+    if frame_count != expected_frames:
+        raise ValueError(
+            f"split-context MoE expects frame_count={expected_frames} from max_demos={max_demos}, got {frame_count}."
+        )
+    if active_demo_count is None:
+        active_demo_count = infer_active_demo_count(frame_valid_mask=frame_valid_mask, max_demos=max_demos)
+    active_demo_count = active_demo_count.to(device=frame_valid_mask.device, dtype=torch.long).clamp(min=0, max=max_demos)
+    max_active = int(active_demo_count.max().item()) if active_demo_count.numel() > 0 else 0
+    if max_active <= 0:
+        cudagraph_step_begin_if_available()
+        with autocast_context(x_t.device, autocast_enabled):
+            return model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+
+    split_demo_chunk_size = int(split_demo_chunk_size)
+    split_counts = torch.clamp(
+        (active_demo_count + split_demo_chunk_size - 1) // split_demo_chunk_size,
+        min=1,
+    )
+    max_splits = int(split_counts.max().item())
+    if max_splits <= 1:
+        cudagraph_step_begin_if_available()
+        with autocast_context(x_t.device, autocast_enabled):
+            return model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+
+    demo_slots = torch.arange(max_demos, device=frame_valid_mask.device).view(1, max_demos)
+    demo_starts = (max_demos - active_demo_count).view(batch_size, 1)
+    query_frames_start = 2 * max_demos
+    full_valid = frame_valid_mask.bool()
+    logits_sum: Optional[torch.Tensor] = None
+
+    for split_idx in range(max_splits):
+        split_enabled = (split_idx < split_counts).view(batch_size, 1)
+        chunk_start = demo_starts + split_idx * split_demo_chunk_size
+        chunk_end = torch.minimum(chunk_start + split_demo_chunk_size, torch.full_like(chunk_start, max_demos))
+        keep_demo_slots = (demo_slots >= chunk_start) & (demo_slots < chunk_end) & split_enabled
+        keep_demo_frames = keep_demo_slots.repeat_interleave(2, dim=1)
+
+        split_valid = torch.zeros_like(full_valid)
+        split_valid[:, :query_frames_start] = full_valid[:, :query_frames_start] & keep_demo_frames.unsqueeze(-1).unsqueeze(-1)
+        split_valid[:, query_frames_start:] = full_valid[:, query_frames_start:]
+
+        split_x_t = x_t * split_valid.unsqueeze(-1).to(dtype=x_t.dtype)
+        cudagraph_step_begin_if_available()
+        with autocast_context(x_t.device, autocast_enabled):
+            split_logits = model(split_x_t, frame_times, frame_valid_mask=split_valid)
+
+        frame_active = split_valid.view(batch_size, frame_count, -1).any(dim=-1)
+        frame_active = frame_active & split_enabled
+        split_logits = split_logits * frame_active[:, :, None, None, None].to(split_logits.dtype)
+        logits_sum = split_logits if logits_sum is None else (logits_sum + split_logits)
+
+    if logits_sum is None:
+        raise RuntimeError("split-context MoE produced no logits.")
+    return logits_sum
+
+
 def discrete_flow_matching_loss(
     logits: torch.Tensor,
     clean_tokens: torch.Tensor,
@@ -791,7 +889,10 @@ def denoise_last_solution_frame_discrete(
     frames: torch.Tensor,
     frame_valid_mask: torch.Tensor,
     target_frame_index: torch.Tensor,
+    active_demo_count: Optional[torch.Tensor],
     num_colors: int,
+    max_demos: int,
+    split_context_moe_demo_chunk_size: int,
     steps: int,
     path: MixtureDiscreteProbPath,
     reverse_sampler: str,
@@ -815,6 +916,9 @@ def denoise_last_solution_frame_discrete(
             state_context = extras["state_context"]
             frame_valid_mask_local = extras["frame_valid_mask"]
             target_frame_index_local = extras["target_frame_index"]
+            active_demo_count_local = extras.get("active_demo_count")
+            split_context_moe_demo_chunk_size_local = int(extras.get("split_context_moe_demo_chunk_size", 0))
+            max_demos_local = int(extras.get("max_demos", 0))
             autocast_enabled_local = bool(extras.get("autocast_enabled", False))
 
             bsz, fcount, hh, ww = state_context.shape
@@ -826,9 +930,16 @@ def denoise_last_solution_frame_discrete(
             frame_times[batch_idx, target_frame_index_local] = t
 
             state_onehot = one_hot_frames(state, num_colors=self.vocab_size)
-            cudagraph_step_begin_if_available()
-            with autocast_context(state.device, autocast_enabled_local):
-                logits = self.flow_model(state_onehot, frame_times, frame_valid_mask=frame_valid_mask_local)
+            logits = forward_with_split_context_moe(
+                self.flow_model,
+                state_onehot,
+                frame_times,
+                frame_valid_mask=frame_valid_mask_local,
+                active_demo_count=active_demo_count_local,
+                max_demos=max_demos_local,
+                split_demo_chunk_size=split_context_moe_demo_chunk_size_local,
+                autocast_enabled=autocast_enabled_local,
+            )
             target_logits = logits[batch_idx, target_frame_index_local].float().reshape(bsz, hh * ww, self.vocab_size)
             probs = torch.softmax(target_logits, dim=-1)
             if self.force_argmax:
@@ -855,6 +966,9 @@ def denoise_last_solution_frame_discrete(
         state_context=frames,
         frame_valid_mask=frame_valid_mask,
         target_frame_index=target_frame_index,
+        active_demo_count=active_demo_count,
+        split_context_moe_demo_chunk_size=split_context_moe_demo_chunk_size,
+        max_demos=max_demos,
         autocast_enabled=autocast_enabled,
     )
     predicted = sampled.view(batch_size, height, width)
@@ -869,6 +983,8 @@ def evaluate_last_frame_accuracy(
     *,
     device: torch.device,
     num_colors: int,
+    max_demos: int,
+    split_context_moe_demo_chunk_size: int,
     sample_steps: int,
     path: MixtureDiscreteProbPath,
     reverse_sampler: str,
@@ -897,6 +1013,7 @@ def evaluate_last_frame_accuracy(
         target_frame_index = batch["target_frame_index"].to(device)
         target_output = batch["target_output"].to(device)
         target_valid_mask = batch["target_valid_mask"].to(device)
+        active_demo_count = batch["active_demo_count"].to(device)
         task_names = batch["task_names"]
         query_indices = batch["query_indices"]
 
@@ -905,7 +1022,10 @@ def evaluate_last_frame_accuracy(
             frames=frames,
             frame_valid_mask=frame_valid_mask,
             target_frame_index=target_frame_index,
+            active_demo_count=active_demo_count,
             num_colors=num_colors,
+            max_demos=max_demos,
+            split_context_moe_demo_chunk_size=split_context_moe_demo_chunk_size,
             steps=sample_steps,
             path=path,
             reverse_sampler=reverse_sampler,
@@ -994,6 +1114,8 @@ def evaluate_discrete_flow_loss(
     *,
     device: torch.device,
     num_colors: int,
+    max_demos: int,
+    split_context_moe_demo_chunk_size: int,
     time_discretization_steps: int,
     path: MixtureDiscreteProbPath,
     loss_function: _Loss,
@@ -1012,6 +1134,7 @@ def evaluate_discrete_flow_loss(
         frame_valid_mask = batch["frame_valid_mask"].to(device)
         target_frame_index = batch["target_frame_index"].to(device)
         target_valid_mask = batch["target_valid_mask"].to(device)
+        active_demo_count = batch["active_demo_count"].to(device)
 
         batch_size, frame_count, _, _ = frames.shape
         frame_times = sample_frame_times(
@@ -1028,9 +1151,16 @@ def evaluate_discrete_flow_loss(
             path=path,
         )
         x_t = one_hot_frames(x_t_tokens, num_colors=num_colors)
-        cudagraph_step_begin_if_available()
-        with autocast_context(device, autocast_enabled):
-            logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+        logits = forward_with_split_context_moe(
+            model,
+            x_t,
+            frame_times,
+            frame_valid_mask=frame_valid_mask,
+            active_demo_count=active_demo_count,
+            max_demos=max_demos,
+            split_demo_chunk_size=split_context_moe_demo_chunk_size,
+            autocast_enabled=autocast_enabled,
+        )
         loss = discrete_flow_matching_loss(
             logits.float(),
             frames,
@@ -1078,10 +1208,21 @@ def save_checkpoint(
 def train(args: argparse.Namespace) -> None:
     distributed, rank, local_rank, world_size, device = setup_distributed(args)
     is_main = rank == 0
+    if args.split_context_moe_demo_chunk_size < 0:
+        raise ValueError("--split-context-moe-demo-chunk-size must be >= 0.")
     set_seed(args.seed + rank)
     bf16_autocast = bool(args.bf16_autocast and device.type == "cuda" and torch.cuda.is_bf16_supported())
     if args.bf16_autocast and is_main and not bf16_autocast:
         print("Warning: BF16 autocast requested but unavailable on this device. Falling back to fp32.")
+    if (
+        is_main
+        and args.split_context_moe_demo_chunk_size > 0
+        and not (args.mask_pad_attention or args.mask_intra_frame_pad_attention)
+    ):
+        print(
+            "Warning: split-context MoE works best with attention padding masks enabled "
+            "(--mask-pad-attention or --mask-intra-frame-pad-attention)."
+        )
 
     train_dataset, train_loader, eval_dataset, eval_loader, train_sampler, eval_sampler = build_flow_context_dataloaders(
         args,
@@ -1154,6 +1295,10 @@ def train(args: argparse.Namespace) -> None:
         print(f"Discrete scheduler: {args.discrete_scheduler}" + (f" ({scheduler_desc})" if scheduler_desc else ""))
         print(f"Discrete loss: {args.loss_function}")
         print(f"Train/eval-loss time discretization steps: {args.train_time_discretization_steps}")
+        if args.split_context_moe_demo_chunk_size > 0:
+            print(
+                f"Split-context compositional MoE enabled: demos-per-expert={args.split_context_moe_demo_chunk_size}"
+            )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1208,6 +1353,7 @@ def train(args: argparse.Namespace) -> None:
             frame_valid_mask = batch["frame_valid_mask"].to(device)
             target_frame_index = batch["target_frame_index"].to(device)
             target_valid_mask = batch["target_valid_mask"].to(device)
+            active_demo_count = batch["active_demo_count"].to(device)
 
             batch_size, frame_count, _, _ = frames.shape
             frame_times = sample_frame_times(
@@ -1225,9 +1371,16 @@ def train(args: argparse.Namespace) -> None:
                 path=path,
             )
             x_t = one_hot_frames(x_t_tokens, num_colors=args.num_colors)
-            cudagraph_step_begin_if_available()
-            with autocast_context(device, bf16_autocast):
-                logits = model(x_t, frame_times, frame_valid_mask=frame_valid_mask)
+            logits = forward_with_split_context_moe(
+                model,
+                x_t,
+                frame_times,
+                frame_valid_mask=frame_valid_mask,
+                active_demo_count=active_demo_count,
+                max_demos=args.max_demos,
+                split_demo_chunk_size=args.split_context_moe_demo_chunk_size,
+                autocast_enabled=bf16_autocast,
+            )
             loss = discrete_flow_matching_loss(
                 logits.float(),
                 frames,
@@ -1351,7 +1504,7 @@ def train(args: argparse.Namespace) -> None:
 
             if eval_on_steps and global_step % args.eval_every_steps == 0:
                 # Free large per-step training tensors before eval to avoid transient OOM spikes.
-                del frames, frame_valid_mask, target_frame_index, target_valid_mask
+                del frames, frame_valid_mask, target_frame_index, target_valid_mask, active_demo_count
                 del frame_times, x_t_tokens, x_t, logits, loss
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
@@ -1363,6 +1516,8 @@ def train(args: argparse.Namespace) -> None:
                     eval_loader if eval_loader is not None else train_loader,
                     device=device,
                     num_colors=args.num_colors,
+                    max_demos=args.max_demos,
+                    split_context_moe_demo_chunk_size=args.split_context_moe_demo_chunk_size,
                     time_discretization_steps=args.train_time_discretization_steps,
                     path=path,
                     loss_function=loss_function,
@@ -1375,6 +1530,8 @@ def train(args: argparse.Namespace) -> None:
                     eval_loader if eval_loader is not None else train_loader,
                     device=device,
                     num_colors=args.num_colors,
+                    max_demos=args.max_demos,
+                    split_context_moe_demo_chunk_size=args.split_context_moe_demo_chunk_size,
                     sample_steps=args.sample_steps,
                     path=path,
                     reverse_sampler=args.reverse_sampler,
@@ -1475,6 +1632,8 @@ def train(args: argparse.Namespace) -> None:
                 eval_loader if eval_loader is not None else train_loader,
                 device=device,
                 num_colors=args.num_colors,
+                max_demos=args.max_demos,
+                split_context_moe_demo_chunk_size=args.split_context_moe_demo_chunk_size,
                 time_discretization_steps=args.train_time_discretization_steps,
                 path=path,
                 loss_function=loss_function,
@@ -1487,6 +1646,8 @@ def train(args: argparse.Namespace) -> None:
                 eval_loader if eval_loader is not None else train_loader,
                 device=device,
                 num_colors=args.num_colors,
+                max_demos=args.max_demos,
+                split_context_moe_demo_chunk_size=args.split_context_moe_demo_chunk_size,
                 sample_steps=args.sample_steps,
                 path=path,
                 reverse_sampler=args.reverse_sampler,
