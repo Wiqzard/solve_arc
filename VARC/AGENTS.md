@@ -27,4 +27,5 @@ Preferred default for new jobs in this repo:
 ### QoS-specific limits observed for user `ss24i671` (`job_gratis`)
 
 - per-job GPU limits: `h200=0`, `h100=1`, `rtx4090=2`, total `gpu<=3`
+- per `h100:1` request, scheduler enforces approximately `CPU<=16` and `RAM<=92160MB`
 - practical high-end default for this user: `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=h100:1`

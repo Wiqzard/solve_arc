@@ -3,8 +3,9 @@
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-node=h100:1
+#SBATCH --mem=90G
 #SBATCH --time=08:00:00
 #SBATCH --output=outputs/ubelix_ca2d/slurm-%j.out
 
