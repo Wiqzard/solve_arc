@@ -5,7 +5,7 @@
 *.pt
 *.pth
 ckpts/
-data/
+#data/
 __pycache__
 .ipynb_checkpoints
 *.pth
@@ -24,7 +24,7 @@ venv/
 runs/
 samples/
 *validation/
-data/
+#data/
 outputs/
 outputs_video
 checkpoints/
