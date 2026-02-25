@@ -80,6 +80,6 @@ preprocess_output_text/
 
 
 # VARC data/training artifacts
-**/raw_data/
+#**/raw_data/
 **/saves/
 **/datasets/
