@@ -6,11 +6,12 @@
 
 ## UBELIX / SLURM Execution Rules
 
-1. Prefer running experiments on UBELIX via `ssh ss24i671@submit03.unibe.ch`.
-2. When requesting GPUs on UBELIX, always request the maximum number of GPUs that can be allocated concurrently for the selected GPU type/partition.
-3. Prefer high-end GPU types when available (for example RTX 4090), while still requesting the maximum allocatable count.
-4. For interactive runs, use `srun` with explicit GPU type/count and request the maximum allowed count.
-5. For batch runs, use `sbatch` with explicit `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=<type>:<max_count>`.
+1. Prefer running experiments on UBELIX via `ssh ubelix` (default access method).
+2. If the alias is unavailable, fallback to `ssh ss24i671@submit03.unibe.ch`.
+3. When requesting GPUs on UBELIX, always request the maximum number of GPUs that can be allocated concurrently for the selected GPU type/partition.
+4. Prefer high-end GPU types when available (for example RTX 4090), while still requesting the maximum allocatable count.
+5. For interactive runs, use `srun` with explicit GPU type/count and request the maximum allowed count.
+6. For batch runs, use `sbatch` with explicit `#SBATCH --partition=gpu` and `#SBATCH --gpus-per-node=<type>:<max_count>`.
 
 ### UBELIX GPU capacity notes (queried on 2026-02-24 via `sinfo`)
 
